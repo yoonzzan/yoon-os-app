@@ -14,6 +14,7 @@
     --accent:#b9542a; --ok:#3f7d58;
     --c1:#5b7fa6; --c2:#3f7d58; --c3:#b9542a; --c4:#7a6ba6; --c5:#c08a2e; --c6:#4f8f8a;
     --sb:env(safe-area-inset-bottom,0px);
+    --st:env(safe-area-inset-top,0px);
   }
   @media (prefers-color-scheme:dark){
     :root{ --bg:#16150f; --card:#1f1e19; --ink:#efece5; --dim:#948e84; --line:#312f28; }
@@ -22,7 +23,9 @@
   body{margin:0;background:var(--bg);color:var(--ink);
     font:16px/1.55 -apple-system,BlinkMacSystemFont,"Pretendard","Apple SD Gothic Neo",sans-serif;
     overscroll-behavior-y:none}
-  .wrap{max-width:760px;margin:0 auto;padding:10px 14px calc(30px + var(--sb))}
+  /* 홈 화면에 추가하면 상태바 아래로 내용이 들어갑니다 — 안전영역만큼 밀어줍니다 */
+  .wrap{max-width:760px;margin:0 auto;
+    padding:calc(12px + var(--st)) 14px calc(30px + var(--sb))}
   [hidden]{display:none !important}
   input,textarea,select,button{font:inherit}
 
@@ -146,10 +149,8 @@
   <input type="text" id="s-repo" placeholder="life-os" autocapitalize="off" autocorrect="off">
   <label class="f">Personal access token</label>
   <input type="text" id="s-token" placeholder="github_pat_..." autocapitalize="off" autocorrect="off">
-  <label class="f">업무 프로젝트 (쉼표 구분)</label>
-  <input type="text" id="s-work" placeholder="11-quote-editor, 12-hanatour-travel-terms">
-  <label class="f">사이드 프로젝트 (쉼표 구분)</label>
-  <input type="text" id="s-side" placeholder="17-yoondays, 28-telegram-to-lifeos">
+  <p style="margin:14px 0 0;font-size:12px;color:var(--dim)">
+    업무·사이드 프로젝트 목록은 저장소에서 자동으로 불러옵니다.</p>
   <button class="save" id="s-save">시작하기</button>
 </section>
 
@@ -221,7 +222,7 @@
 
 <script>
 'use strict';
-const LS = { cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data' };
+const LS = { cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data', p:'yz-proj' };
 
 const TYPES = [
   { id:'memo',  e:'💭', l:'메모'   }, { id:'todo',  e:'✅', l:'할일'   },
@@ -344,6 +345,28 @@ async function putCapture(payload){
   });
 }
 
+/* 프로젝트 목록은 저장소 폴더 이름에서 그대로 가져옵니다.
+   손으로 입력하면 오타가 나고, 프로젝트를 추가할 때마다 앱 설정을 고쳐야 합니다. */
+async function loadProjects(force){
+  const c = ls.get(LS.p, null);
+  if(!force && c && Date.now() - c.at < 7*864e5){
+    cfg.work = c.work; cfg.side = c.side; return;
+  }
+  try{
+    const [w, s] = await Promise.all([
+      gh('10-projects/11-work-projects'),
+      gh('10-projects/12-side-projects'),
+    ]);
+    const dirs = a => (Array.isArray(a) ? a : []).filter(x => x.type==='dir')
+                                                 .map(x => x.name).sort();
+    cfg.work = dirs(w); cfg.side = dirs(s);
+    ls.set(LS.p, { work:cfg.work, side:cfg.side, at:Date.now() });
+    if(st.type==='work' || st.type==='side') syncFields();
+  }catch(e){
+    if(c){ cfg.work = c.work; cfg.side = c.side; }     // 오프라인이면 캐시 사용
+  }
+}
+
 async function loadData(){
   const j = await gh('records.json?ref=' + (cfg.branch || 'main'));
   const d = JSON.parse(b64decode(j.content));
@@ -394,7 +417,7 @@ function fieldHtml(prefix, [key, label, kind]){
     return `<label class="f" for="${id}">${esc(label)}</label>
             <select id="${id}" data-k="${key}">${
               list.length ? list.map(p=>`<option>${esc(p)}</option>`).join('')
-                          : '<option value="">프로젝트 미설정</option>'}</select>`;
+                          : '<option value="">불러오는 중…</option>'}</select>`;
   }
   if(kind.startsWith('sel:'))
     return `<label class="f" for="${id}">${esc(label)}</label>
@@ -656,14 +679,13 @@ $('q').oninput = e => { st.q = e.target.value; renderList(); };
 $('s-save').onclick = () => {
   const owner = $('s-owner').value.trim(), repo = $('s-repo').value.trim(), token = $('s-token').value.trim();
   if(!owner || !repo || !token) return toast('사용자명·저장소·토큰을 넣어주세요', true);
-  const csv = v => v.split(',').map(s=>s.trim()).filter(Boolean);
-  ls.set(LS.cfg, { owner, repo, token, branch:'main', work:csv($('s-work').value), side:csv($('s-side').value) });
+  ls.set(LS.cfg, { owner, repo, token, branch:'main' });
+  localStorage.removeItem(LS.p);              // 프로젝트 목록 새로 받도록
   location.reload();
 };
 $('reset').onclick = () => {
   const c = ls.get(LS.cfg, {});
   $('s-owner').value=c.owner||''; $('s-repo').value=c.repo||''; $('s-token').value=c.token||'';
-  $('s-work').value=(c.work||[]).join(', '); $('s-side').value=(c.side||[]).join(', ');
   $('app').hidden = true; $('setup').hidden = false;
 };
 
@@ -682,7 +704,8 @@ $('reset').onclick = () => {
   render('en', 'en-fields', ENGLISH);
   renderTypes(); syncFields(); renderRecent(); renderQueue();
   flush(false);
-  window.addEventListener('online', () => flush(true));
+  loadProjects(false);
+  window.addEventListener('online', () => { flush(true); loadProjects(true); });
 
   // 딥링크: ?m=morning | night | view  (텔레그램 알림이 이 주소로 보냅니다)
   const m = new URLSearchParams(location.search).get('m');
