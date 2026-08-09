@@ -121,6 +121,10 @@
   .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   .card .t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:99px;color:#fff}
   .card .d{font-size:11px;color:var(--dim)}
+  .card .d em{font-style:normal;opacity:.65;margin-left:6px}
+  .stat.tap{cursor:pointer}
+  .stat.tap.on{border-color:var(--accent);background:var(--accent)}
+  .stat.tap.on .n,.stat.tap.on .l{color:#fff}
   .card p{margin:0;font-size:13.5px;white-space:pre-wrap;
     display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
   .card p.open{-webkit-line-clamp:unset}
@@ -590,8 +594,15 @@ function renderStats(){
   $('stats').innerHTML = `
     <div class="stat"><div class="n">${w}</div><div class="l">이번 주 기록</div></div>
     <div class="stat"><div class="n">${DATA.streak||0}</div><div class="l">연속 기록일</div></div>
-    <div class="stat ${links?'hot':''}"><div class="n">${links}</div><div class="l">안 읽은 링크</div></div>
-    <div class="stat"><div class="n">${Math.round((DATA.spending||0)/10000)}만</div><div class="l">이번 달 소비</div></div>`;
+    <div class="stat tap ${st.tag==='링크'?'on':''}" data-f="링크">
+      <div class="n">${links}</div><div class="l">안 읽은 링크 ›</div></div>
+    <div class="stat tap ${st.tag==='장소'?'on':''}" data-f="장소">
+      <div class="n">${places}</div><div class="l">가고싶은 곳 ›</div></div>`;
+  $('stats').querySelectorAll('.tap').forEach(b => b.onclick = () => {
+    st.tag = (st.tag === b.dataset.f) ? '' : b.dataset.f;
+    renderStats(); renderList();
+    $('list').scrollIntoView({ behavior:'smooth', block:'start' });
+  });
 }
 function renderChips(){
   const items = ['전체', ...VIEW_TYPES.filter(t => ALL.some(r=>r.type===t))];
@@ -604,10 +615,14 @@ function renderChips(){
   });
 }
 function card(r){
-  const d = r._d && r._d.getTime() ? r._d.toLocaleDateString('ko-KR',{month:'numeric',day:'numeric'}) : '';
+  // date = 기록이 속한 날짜 · saved = 실제로 저장한 시각
+  const d = r._d && r._d.getTime()
+    ? r._d.toLocaleDateString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',weekday:'short'})
+        .replace(/\.$/,'')
+    : '';
   return `<article class="card">
     <div class="meta"><span class="t" style="background:${COLOR[r.type]||'var(--dim)'}">${esc(r.type)}</span>
-    <span class="d">${d}</span></div>
+    <span class="d">${d}${r.saved ? `<em>저장 ${esc(r.saved)}</em>` : ''}</span></div>
     <p>${esc(r.body||'')}</p>
     ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(host(r.url))}</a>` : ''}
     ${(r.tags||[]).length ? `<div class="tg">#${r.tags.map(esc).join(' #')}</div>` : ''}
