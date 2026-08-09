@@ -80,6 +80,7 @@
 
   .recent{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}
   .recent h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:500}
+  .recent .sync-note{font-size:11.5px;color:var(--dim);margin:-3px 0 8px}
   .recent ul{margin:0;padding:0}
   .recent li{list-style:none;font-size:13px;color:var(--dim);padding:6px 0;
     border-bottom:1px solid var(--line);display:flex;gap:8px}
@@ -181,7 +182,7 @@
       <div class="row"><input type="text" id="q-tags" placeholder="태그 (선택)"></div>
       <button class="save" id="q-save">저장</button>
       <div class="queue" id="queue"></div>
-      <div class="recent"><h4>최근 기록</h4><ul id="recent"></ul></div>
+      <div class="recent"><h4>최근 기록</h4><p class="sync-note">이 기기에서 방금 저장한 기록입니다. ‘보기’는 데일리노트 반영 뒤 갱신됩니다.</p><ul id="recent"></ul></div>
     </div>
 
     <div id="m-morning" hidden>
@@ -480,7 +481,7 @@ function renderRecent(){
 }
 function renderQueue(){
   const q = ls.get(LS.q, []);
-  $('queue').innerHTML = q.length ? `전송 대기 <b>${q.length}</b>건 <button id="flush">지금 보내기</button>` : '';
+  $('queue').innerHTML = q.length ? `이 기기에 전송 대기 <b>${q.length}</b>건 <button id="flush">지금 보내기</button>` : '';
   if(q.length) $('flush').onclick = () => flush(true);
 }
 async function flush(loud){
@@ -489,18 +490,18 @@ async function flush(loud){
   const left = [];
   for(const p of q){ try{ await putCapture(p); }catch(e){ left.push(p); } }
   ls.set(LS.q, left); renderQueue();
-  if(loud) toast(left.length ? `${left.length}건 남음` : '전송 완료', !!left.length);
+  if(loud) toast(left.length ? `${left.length}건이 이 기기에 남아 있습니다` : '원격 전송 완료 · 데일리노트 자동 반영 중', !!left.length);
 }
-async function submit(payload, okMsg){
+async function submit(payload){
   payload.id = newId();
   payload.captured_at = nowLocal();
   const rec = ls.get(LS.r, []);
   rec.unshift({ e:(TYPES.find(t=>t.id===payload.type)||{}).e || '📝', text:(payload.body||'').slice(0,40) });
   ls.set(LS.r, rec.slice(0,20)); renderRecent();
-  try{ await putCapture(payload); toast(okMsg || '저장됨'); }
+  try{ await putCapture(payload); toast('원격 저장됨 · 데일리노트 자동 반영 중'); }
   catch(e){
     const q = ls.get(LS.q, []); q.push(payload); ls.set(LS.q, q); renderQueue();
-    toast('오프라인 — 큐에 보관', true);
+    toast('전송 실패 · 이 기기에 임시 보관됨', true);
   }
 }
 
@@ -534,7 +535,7 @@ $('mo-save').onclick = async () => {
   const p = collect('mo-detail', collect('mo-fields', { type:'morning' }));
   if(!p.agenda && !p.keyword) return toast('안건이나 키워드를 적어주세요', true);
   p.body = [p.keyword, p.agenda].filter(Boolean).join(' / ');
-  await submit(p, '아침 기록 저장됨');
+  await submit(p);
   clearFields('mo-fields','mo-detail');
 };
 
@@ -542,7 +543,7 @@ $('ni-save').onclick = async () => {
   const p = collect('ni-detail', collect('ni-fields', { type:'night' }));
   if(!p.today) return toast('오늘 어땠는지 한 줄이라도', true);
   p.body = p.today;
-  await submit(p, '밤 기록 저장됨');
+  await submit(p);
   clearFields('ni-fields','ni-detail');
 };
 
@@ -550,7 +551,7 @@ $('en-save').onclick = async () => {
   const p = collect('en-fields', { type:'english' });
   if(!p.en && !p.ko) return toast('영어나 한국어 중 하나는 적어주세요', true);
   p.body = p.en || p.ko;
-  await submit(p, '영어일기 저장됨');
+  await submit(p);
   clearFields('en-fields');
 };
 
