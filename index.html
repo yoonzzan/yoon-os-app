@@ -272,7 +272,10 @@ const FIELDS = {
   todo:  { detail:[['due','기한','text']] },
   money: { basic:[['amount','금액','num'], ['category','카테고리','cat']],
            detail:[['pay','결제수단','text']] },
-  link:  { detail:[['title','제목','text'], ['author','글쓴이','text'],
+  /* 입수 경로는 Tally 「리딩 리스트」에 있던 항목인데 앱으로 옮기며 빠졌다.
+     도서관·구입 자료는 링크가 없는 게 정상이라 URL 과 별개로 남긴다. */
+  link:  { basic:[['channel','입수 경로','sel:구입|도서관|온라인']],
+           detail:[['title','제목','text'], ['author','글쓴이','text'],
                    ['publisher','발행처','text'], ['why','왜 저장했는지','area'],
                    ['status','상태','sel:읽기 전|읽는 중|읽음|미확인']] },
   learn: { detail:[['source','출처','text'], ['note','비고','area']] },
