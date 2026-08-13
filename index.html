@@ -133,6 +133,31 @@
   .card .tg{margin-top:8px;font-size:11px;color:var(--dim)}
   .blk{margin-top:24px}
   .blk h3{font-size:14px;margin:0 0 10px}
+
+  /* 열두가지 질문 — 매일 보는 게 아니라 꺼내 보는 렌즈라 접어 둡니다 */
+  #quest{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:0;margin-bottom:14px;overflow:hidden}
+  #quest summary{list-style:none;cursor:pointer;padding:13px 15px;font-size:12px;
+    color:var(--dim);display:flex;align-items:center;gap:7px}
+  #quest summary::-webkit-details-marker{display:none}
+  #quest summary b{color:var(--ink);font-size:13px;font-weight:600}
+  #quest summary i{margin-left:auto;font-style:normal;font-size:11px;color:var(--dim)}
+  #quest ol{margin:0;padding:0 15px 13px 15px;list-style:none;
+    display:flex;flex-direction:column;gap:9px}
+  #quest li{display:grid;grid-template-columns:20px 1fr;gap:9px;font-size:13px;line-height:1.5}
+  #quest li .no{color:var(--dim);font-size:11.5px;padding-top:2px}
+  #quest li .m{display:block;color:var(--dim);font-size:11.5px;margin-top:2px}
+  #quest li.todo .q{color:var(--dim)}
+
+  /* 기록 현황 — 꺼내보는 화면과 성격이 달라 맨 아래로 내렸습니다 */
+  #status{margin-top:24px;border-top:1px solid var(--line);padding-top:14px}
+  #status h3{font-size:12px;margin:0 0 10px;color:var(--dim);font-weight:600}
+  #status .row4{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+  @media(min-width:560px){ #status .row4{grid-template-columns:repeat(4,1fr)} }
+  #status .s{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:11px 13px}
+  #status .s b{display:block;font-size:19px;font-weight:650;letter-spacing:-.5px;line-height:1.2}
+  #status .s span{color:var(--dim);font-size:11px}
   .empty{color:var(--dim);font-size:13.5px;text-align:center;padding:26px 0}
 
   #setup{padding:20px 0}
@@ -206,6 +231,7 @@
 
   <section id="v-view" hidden>
     <div id="plan"></div>
+    <details id="quest" hidden></details>
     <div id="timeuse" hidden></div>
     <div class="stats" id="stats"></div>
     <input id="q" placeholder="검색…">
@@ -215,6 +241,7 @@
     <div class="blk" id="s-link" hidden><h3>📖 안 읽은 링크</h3><div class="list" id="g-link"></div></div>
     <div class="blk" id="s-place" hidden><h3>📍 가고싶은 곳</h3><div class="list" id="g-place"></div></div>
     <button class="ghost" id="digest">이번 주 회고 재료 복사</button>
+    <div id="status"></div>
     <div class="queue" id="built"></div>
   </section>
 
@@ -651,14 +678,27 @@ function renderTimeuse(){
       `<span><i style="background:${AREA_COLOR[k]||'var(--dim)'}"></i>${esc(k)} ${fmt(v)}</span>`).join('')}</div>`;
 }
 
+/* 열두가지 좋아하는 질문 — 공명하는 내용을 거르는 렌즈.
+   정본은 49-questions.md 이고 여기서는 읽기만 합니다. 기록은 ❓ 질문 타입으로 합니다. */
+function renderQuestions(){
+  const qs = DATA.questions || [];
+  if(!qs.length){ $('quest').hidden = true; return; }
+  $('quest').hidden = false;
+  const done = qs.filter(q => q.q).length;
+  $('quest').innerHTML =
+    `<summary><b>❓ 열두가지 질문</b> 꺼내보기<i>${done}/${qs.length}</i></summary>
+     <ol>${qs.map(q => `<li class="${q.q ? '' : 'todo'}">
+       <span class="no">${q.n}</span>
+       <span><span class="q">${q.q ? esc(q.q) : '아직 비어 있음'}</span>
+       ${q.note || q.area ? `<span class="m">${[q.note, q.area].filter(Boolean).map(esc).join(' · ')}</span>` : ''}
+       </span></li>`).join('')}</ol>`;
+}
+
+/* 지금 처리할 것만 위에 둡니다. 눌러서 거를 수 있는 두 칸입니다. */
 function renderStats(){
-  const week = Date.now() - 7*864e5;
-  const w = ALL.filter(r => r._d.getTime() >= week).length;
   const links = ALL.filter(r => r.type==='링크' && !r.done).length;
   const places = ALL.filter(r => r.type==='장소' && !r.done).length;
   $('stats').innerHTML = `
-    <div class="stat"><div class="n">${w}</div><div class="l">이번 주 기록</div></div>
-    <div class="stat"><div class="n">${DATA.streak||0}</div><div class="l">연속 기록일</div></div>
     <div class="stat tap ${st.tag==='링크'?'on':''}" data-f="링크">
       <div class="n">${links}</div><div class="l">안 읽은 링크 ›</div></div>
     <div class="stat tap ${st.tag==='장소'?'on':''}" data-f="장소">
@@ -713,8 +753,28 @@ function renderList(){
     bind($('g-'+id));
   });
 }
+/* 얼마나 쓰고 있는지는 꺼내보는 일과 성격이 달라 맨 아래에 둡니다.
+   위에 두면 매번 눈에 들어오는데, 정작 눌러서 할 일이 없는 숫자입니다. */
+function renderStatus(){
+  const week = Date.now() - 7*864e5;
+  const month = new Date(); month.setDate(1); month.setHours(0,0,0,0);
+  const w = ALL.filter(r => r._d.getTime() >= week).length;
+  const m = ALL.filter(r => r._d.getTime() >= month.getTime()).length;
+  const last = ALL.length
+    ? ALL[0]._d.toLocaleDateString('ko-KR',{month:'numeric',day:'numeric'}).replace(/\.$/,'')
+    : '—';
+  $('status').innerHTML = `<h3>기록 현황</h3>
+    <div class="row4">
+      <div class="s"><b>${w}</b><span>이번 주</span></div>
+      <div class="s"><b>${m}</b><span>이번 달</span></div>
+      <div class="s"><b>${DATA.streak||0}</b><span>연속 기록일</span></div>
+      <div class="s"><b>${last}</b><span>마지막 기록</span></div>
+    </div>`;
+}
+
 function renderView(){
-  prepData(); renderPlan(); renderTimeuse(); renderStats(); renderList();
+  prepData(); renderPlan(); renderQuestions(); renderTimeuse();
+  renderStats(); renderList(); renderStatus();
   $('built').textContent = DATA.built ? `${ALL.length}건 · ${DATA.built} 기준` : '';
 }
 
