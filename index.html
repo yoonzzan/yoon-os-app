@@ -271,7 +271,9 @@ const FIELDS = {
   memo:  { detail:[['kind','종류','sel:영감|아이디어|사운드']] },
   todo:  { detail:[['due','기한','text']] },
   money: { basic:[['amount','금액','num'], ['category','카테고리','cat']],
-           detail:[['pay','결제수단','text']] },
+           /* 키는 payment_method 다. capture_events.py 의 검증 목록과 v1 daily_money
+              스키마가 그 이름을 쓴다. 앱만 pay 로 보내던 것을 맞췄다 */
+           detail:[['payment_method','결제수단','text']] },
   /* 입수 경로는 Tally 「리딩 리스트」에 있던 항목인데 앱으로 옮기며 빠졌다.
      도서관·구입 자료는 링크가 없는 게 정상이라 URL 과 별개로 남긴다. */
   link:  { basic:[['channel','입수 경로','sel:구입|도서관|온라인']],
@@ -298,7 +300,6 @@ const LEN_LONG = 16384, LEN_SHORT = 512, LEN_URL = 4096, LEN_PROJECT = 128;
 const LEN_BY_KEY = {           // capture_events.py _LEGACY_SHORT_FIELDS 와 동일
   title:LEN_SHORT, due:LEN_SHORT, amount:LEN_SHORT,
   category:LEN_SHORT, payment_method:LEN_SHORT,
-  pay:LEN_SHORT,               // 앱 키. 결제수단이 512자를 넘을 일은 없다
   url:LEN_URL, project:LEN_PROJECT,
 };
 const maxLen = key => LEN_BY_KEY[key] || LEN_LONG;
