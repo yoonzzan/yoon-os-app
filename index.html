@@ -533,7 +533,13 @@ $('q-save').onclick = async () => {
     p.category = p.category || guessCat(raw);
     if(!p.amount) return toast('금액을 입력하세요', true);
   }
-  if(st.type==='link' && !p.url) p.url = extractUrl(raw);
+  /* extractUrl 은 못 찾으면 '' 를 준다. collect 처럼 빈 값은 키째 뺀다 — 검증기가 거부한다 */
+  if(st.type==='link' && !p.url){
+    const found = extractUrl(raw);
+    if(found) p.url = found; else delete p.url;
+  }
+  /* photo 는 스키마상 bool 이다. 선택지 '있음' 문자열을 그대로 보내면 invalid_photo */
+  if(st.type==='blog' && 'photo' in p) p.photo = true;
 
   $('q-save').disabled = true;
   await submit(p);
