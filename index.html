@@ -80,7 +80,6 @@
 
   .recent{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}
   .recent h4{font-size:12px;color:var(--dim);margin:0 0 8px;font-weight:500}
-  .recent .sync-note{font-size:11.5px;color:var(--dim);margin:-3px 0 8px}
   .recent ul{margin:0;padding:0}
   .recent li{list-style:none;font-size:13px;color:var(--dim);padding:6px 0;
     border-bottom:1px solid var(--line);display:flex;gap:8px}
@@ -182,7 +181,7 @@
       <div class="row"><input type="text" id="q-tags" placeholder="태그 (선택)"></div>
       <button class="save" id="q-save">저장</button>
       <div class="queue" id="queue"></div>
-      <div class="recent"><h4>최근 기록</h4><p class="sync-note">이 기기에서 방금 저장한 기록입니다. ‘보기’는 데일리노트 반영 뒤 갱신됩니다.</p><ul id="recent"></ul></div>
+      <div class="recent"><h4>최근 기록</h4><ul id="recent"></ul></div>
     </div>
 
     <div id="m-morning" hidden>
@@ -256,8 +255,20 @@ const CAT_RULES = [
    detail = '＋ 상세 입력' 눌러야 펼쳐짐 (탈리에 있던 항목 전부 복원)
    [키, 라벨, 종류] · 종류: text | num | area | sel:a|b|c | proj
    ───────────────────────────────────────────── */
+/* 💭 메모는 성격이 다른 셋을 한 버튼에 담습니다.
+   빠른 캡처는 내용 한 칸으로 끝내고, 상세를 열면 종류에 따라 칸이 바뀝니다.
+   원본: 💡영감 수집 / 📒 Idea note / 🎧 사운드 로그 */
+const MEMO_KINDS = {
+  '':       [],
+  '영감':    [['perception','왜 눈에 띄었나','area'], ['source','출처','text']],
+  '아이디어': [['title','제목','text'], ['note','비고','area']],
+  '사운드':   [['place','장소','text'], ['sound','소리','text'],
+              ['situation','상황','area'], ['observation','관찰','area'],
+              ['mood','기분','text']],
+};
+
 const FIELDS = {
-  memo:  { detail:[['perception','느낀 점 · 왜 눈에 띄었나','area'], ['source','출처','text']] },
+  memo:  { detail:[['kind','종류','sel:영감|아이디어|사운드']] },
   todo:  { detail:[['due','기한','text']] },
   money: { basic:[['amount','금액','num'], ['category','카테고리','cat']],
            detail:[['pay','결제수단','text']] },
@@ -275,11 +286,6 @@ const FIELDS = {
            detail:[['hashtag','해시태그','text'], ['url','URL','text'],
                    ['photo','사진','sel:있음']] },
 };
-
-/* 사운드 로그는 영감(메모)의 상세로 흡수 — 별도 폼 대신 토글로 */
-const SOUND = [['place','장소','text'], ['sound','소리','text'],
-               ['situation','상황','area'], ['observation','관찰','area'],
-               ['mood','기분','text']];
 
 const MORNING_BASIC  = [['keyword','오늘의 키워드','text'], ['agenda','안건 — 오늘 뭘 하는가','area'],
                         ['purpose','목적 — 왜 하는가','area'], ['goal','핵심 목표','text'],
@@ -459,9 +465,14 @@ function syncFields(){
   const t = st.type;
   const spec = FIELDS[t] || {};
   render('q', 'q-basic', spec.basic);
-  // 메모는 사운드 로그 항목까지 상세에 포함
-  const detail = t==='memo' ? [...(spec.detail||[]), ...SOUND] : (spec.detail||[]);
+  const detail = spec.detail || [];
   render('q', 'q-detail', detail);
+  if(t === 'memo'){
+    // 종류를 고르면 그에 맞는 칸만 나타납니다
+    $('q-detail').insertAdjacentHTML('beforeend', '<div id="q-sub"></div>');
+    const sel = $('q-kind');
+    if(sel) sel.onchange = () => render('q', 'q-sub', MEMO_KINDS[sel.value] || []);
+  }
   $('q-more').hidden = detail.length === 0;
   $('q-detail').hidden = true;
   $('q-more').classList.remove('on');
@@ -481,7 +492,7 @@ function renderRecent(){
 }
 function renderQueue(){
   const q = ls.get(LS.q, []);
-  $('queue').innerHTML = q.length ? `이 기기에 전송 대기 <b>${q.length}</b>건 <button id="flush">지금 보내기</button>` : '';
+  $('queue').innerHTML = q.length ? `전송 대기 <b>${q.length}</b>건 <button id="flush">지금 보내기</button>` : '';
   if(q.length) $('flush').onclick = () => flush(true);
 }
 async function flush(loud){
@@ -490,18 +501,18 @@ async function flush(loud){
   const left = [];
   for(const p of q){ try{ await putCapture(p); }catch(e){ left.push(p); } }
   ls.set(LS.q, left); renderQueue();
-  if(loud) toast(left.length ? `${left.length}건이 이 기기에 남아 있습니다` : '원격 전송 완료 · 데일리노트 자동 반영 중', !!left.length);
+  if(loud) toast(left.length ? `${left.length}건 남음` : '전송 완료', !!left.length);
 }
-async function submit(payload){
+async function submit(payload, okMsg){
   payload.id = newId();
   payload.captured_at = nowLocal();
   const rec = ls.get(LS.r, []);
   rec.unshift({ e:(TYPES.find(t=>t.id===payload.type)||{}).e || '📝', text:(payload.body||'').slice(0,40) });
   ls.set(LS.r, rec.slice(0,20)); renderRecent();
-  try{ await putCapture(payload); toast('원격 저장됨 · 데일리노트 자동 반영 중'); }
+  try{ await putCapture(payload); toast(okMsg || '저장됨'); }
   catch(e){
     const q = ls.get(LS.q, []); q.push(payload); ls.set(LS.q, q); renderQueue();
-    toast('전송 실패 · 이 기기에 임시 보관됨', true);
+    toast('오프라인 — 큐에 보관', true);
   }
 }
 
@@ -535,7 +546,7 @@ $('mo-save').onclick = async () => {
   const p = collect('mo-detail', collect('mo-fields', { type:'morning' }));
   if(!p.agenda && !p.keyword) return toast('안건이나 키워드를 적어주세요', true);
   p.body = [p.keyword, p.agenda].filter(Boolean).join(' / ');
-  await submit(p);
+  await submit(p, '아침 기록 저장됨');
   clearFields('mo-fields','mo-detail');
 };
 
@@ -543,7 +554,7 @@ $('ni-save').onclick = async () => {
   const p = collect('ni-detail', collect('ni-fields', { type:'night' }));
   if(!p.today) return toast('오늘 어땠는지 한 줄이라도', true);
   p.body = p.today;
-  await submit(p);
+  await submit(p, '밤 기록 저장됨');
   clearFields('ni-fields','ni-detail');
 };
 
@@ -551,7 +562,7 @@ $('en-save').onclick = async () => {
   const p = collect('en-fields', { type:'english' });
   if(!p.en && !p.ko) return toast('영어나 한국어 중 하나는 적어주세요', true);
   p.body = p.en || p.ko;
-  await submit(p);
+  await submit(p, '영어일기 저장됨');
   clearFields('en-fields');
 };
 
