@@ -174,11 +174,11 @@
 
     <div id="m-quick">
       <div class="types" id="types"></div>
-      <textarea id="q-body" placeholder="무슨 일이든"></textarea>
+      <textarea id="q-body" placeholder="무슨 일이든" maxlength="16384"></textarea>
       <div id="q-basic"></div>
       <button class="more" id="q-more" hidden>＋ 상세 입력</button>
       <div id="q-detail" hidden></div>
-      <div class="row"><input type="text" id="q-tags" placeholder="태그 (선택)"></div>
+      <div class="row"><input type="text" id="q-tags" placeholder="태그 (선택)" maxlength="16384"></div>
       <button class="save" id="q-save">저장</button>
       <div class="queue" id="queue"></div>
       <div class="recent"><h4>최근 기록</h4><ul id="recent"></ul></div>
@@ -289,6 +289,19 @@ const FIELDS = {
            detail:[['hashtag','해시태그','text'], ['url','URL','text'],
                    ['photo','사진','sel:있음']] },
 };
+
+/* 글자 수 상한 — capture_events.py 의 MAX_* 상수와 같게 유지한다.
+   넘으면 서버가 invalid_legacy_field 로 거부하는데, 그 실패는 폰에 보이지 않는다.
+   여기서 먼저 막으면 조용히 격리되는 대신 입력칸이 더 안 받는 것으로 끝난다.
+   목록에 없는 키는 서버가 길이를 보지 않지만, 본문과 같은 상한을 준다. */
+const LEN_LONG = 16384, LEN_SHORT = 512, LEN_URL = 4096, LEN_PROJECT = 128;
+const LEN_BY_KEY = {           // capture_events.py _LEGACY_SHORT_FIELDS 와 동일
+  title:LEN_SHORT, due:LEN_SHORT, amount:LEN_SHORT,
+  category:LEN_SHORT, payment_method:LEN_SHORT,
+  pay:LEN_SHORT,               // 앱 키. 결제수단이 512자를 넘을 일은 없다
+  url:LEN_URL, project:LEN_PROJECT,
+};
+const maxLen = key => LEN_BY_KEY[key] || LEN_LONG;
 
 const MORNING_BASIC  = [['keyword','오늘의 키워드','text'], ['agenda','안건 — 오늘 뭘 하는가','area'],
                         ['purpose','목적 — 왜 하는가','area'], ['goal','핵심 목표','text'],
@@ -416,12 +429,13 @@ function renderTypes(){
 /* ---------- 필드 렌더러 ---------- */
 function fieldHtml(prefix, [key, label, kind]){
   const id = `${prefix}-${key}`;
+  const ml = ` maxlength="${maxLen(key)}"`;
   if(kind === 'area')
     return `<label class="f" for="${id}">${esc(label)}</label>
-            <textarea id="${id}" data-k="${key}" style="min-height:64px"></textarea>`;
+            <textarea id="${id}" data-k="${key}"${ml} style="min-height:64px"></textarea>`;
   if(kind === 'num')
     return `<label class="f" for="${id}">${esc(label)}</label>
-            <input type="text" inputmode="numeric" id="${id}" data-k="${key}">`;
+            <input type="text" inputmode="numeric" id="${id}" data-k="${key}"${ml}>`;
   if(kind === 'cat')
     return `<label class="f" for="${id}">${esc(label)}</label>
             <select id="${id}" data-k="${key}"><option value="">자동 분류</option>
@@ -438,7 +452,7 @@ function fieldHtml(prefix, [key, label, kind]){
             <select id="${id}" data-k="${key}"><option value=""></option>
             ${kind.slice(4).split('|').map(o=>`<option>${esc(o)}</option>`).join('')}</select>`;
   return `<label class="f" for="${id}">${esc(label)}</label>
-          <input type="text" id="${id}" data-k="${key}">`;
+          <input type="text" id="${id}" data-k="${key}"${ml}>`;
 }
 
 function render(prefix, container, spec){
@@ -512,7 +526,9 @@ async function submit(payload, okMsg){
   const rec = ls.get(LS.r, []);
   rec.unshift({ e:(TYPES.find(t=>t.id===payload.type)||{}).e || '📝', text:(payload.body||'').slice(0,40) });
   ls.set(LS.r, rec.slice(0,20)); renderRecent();
-  try{ await putCapture(payload); toast(okMsg || '저장됨'); }
+  /* 여기서 끝난 건 capture/pending 에 올린 것까지다. 실제 반영은 Actions 가 나중에 한다.
+     '저장됨' 은 반영 완료로 읽혀서, 그 사이 실패해도 성공한 줄 알게 된다. */
+  try{ await putCapture(payload); toast(okMsg || '기록함 · 곧 반영'); }
   catch(e){
     const q = ls.get(LS.q, []); q.push(payload); ls.set(LS.q, q); renderQueue();
     toast('오프라인 — 큐에 보관', true);
@@ -536,6 +552,12 @@ $('q-save').onclick = async () => {
     p.category = p.category || guessCat(raw);
     if(!p.amount) return toast('금액을 입력하세요', true);
   }
+  /* 업무·사이드는 서버에서 project 가 필수다. 목록을 못 불러왔을 때 '불러오는 중…'
+     이 선택돼 있으면 값이 빈 문자열이고, collect 가 빈 값을 키째 빼서 project 없이 전송된다.
+     그 payload 는 invalid_project 로 영구 격리되는데 폰에는 저장됐다고 뜬다. 여기서 막는다. */
+  if((st.type==='work' || st.type==='side') && !p.project)
+    return toast('프로젝트 목록을 불러오는 중입니다 — 잠시 후 다시', true);
+
   /* extractUrl 은 못 찾으면 '' 를 준다. collect 처럼 빈 값은 키째 뺀다 — 검증기가 거부한다 */
   if(st.type==='link' && !p.url){
     const found = extractUrl(raw);
@@ -555,7 +577,7 @@ $('mo-save').onclick = async () => {
   const p = collect('mo-detail', collect('mo-fields', { type:'morning' }));
   if(!p.agenda && !p.keyword) return toast('안건이나 키워드를 적어주세요', true);
   p.body = [p.keyword, p.agenda].filter(Boolean).join(' / ');
-  await submit(p, '아침 기록 저장됨');
+  await submit(p, '아침 기록함 · 곧 반영');
   clearFields('mo-fields','mo-detail');
 };
 
@@ -563,7 +585,7 @@ $('ni-save').onclick = async () => {
   const p = collect('ni-detail', collect('ni-fields', { type:'night' }));
   if(!p.today) return toast('오늘 어땠는지 한 줄이라도', true);
   p.body = p.today;
-  await submit(p, '밤 기록 저장됨');
+  await submit(p, '밤 기록함 · 곧 반영');
   clearFields('ni-fields','ni-detail');
 };
 
@@ -571,7 +593,7 @@ $('en-save').onclick = async () => {
   const p = collect('en-fields', { type:'english' });
   if(!p.en && !p.ko) return toast('영어나 한국어 중 하나는 적어주세요', true);
   p.body = p.en || p.ko;
-  await submit(p, '영어일기 저장됨');
+  await submit(p, '영어일기 기록함 · 곧 반영');
   clearFields('en-fields');
 };
 
