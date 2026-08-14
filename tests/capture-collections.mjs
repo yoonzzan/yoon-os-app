@@ -10,30 +10,82 @@ const source = match[1];
 // Contract: keep the inline application script syntactically compilable.
 assert.doesNotThrow(() => new Function(source), 'inline script must compile');
 
-const type = (id, label) => new RegExp(`\\{\\s*id\\s*:\\s*['\"]${id}['\"][\\s\\S]*?l\\s*:\\s*['\"]${label}['\"]\\s*\\}`);
-for (const [id, label] of [
-  ['memo', '메모'],
-  ['inspiration', '영감'],
-  ['idea', '아이디어'],
-  ['sound', '들은 소리'],
-]) assert.match(source, type(id, label), `${id} must be its own capture button`);
+function assignedLiteral(name) {
+  const assignment = new RegExp(`\\bconst\\s+${name}\\s*=\\s*`).exec(source);
+  assert.ok(assignment, `${name} must be assigned`);
+  const start = assignment.index + assignment[0].length;
+  const pairs = { '{': '}', '[': ']' };
+  assert.ok(source[start] in pairs, `${name} must use an object or array literal`);
+  const stack = [];
+  let quote = '';
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      i = source.indexOf('\n', i + 2);
+      assert.notEqual(i, -1, `${name} has an unterminated line comment`);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      i = source.indexOf('*/', i + 2);
+      assert.notEqual(i, -1, `${name} has an unterminated block comment`);
+      i += 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char in pairs) stack.push(pairs[char]);
+    else if (char === stack.at(-1)) {
+      stack.pop();
+      if (!stack.length) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`${name} literal must be balanced`);
+}
+
+const TYPES = new Function(`return (${assignedLiteral('TYPES')})`)();
+const FIELDS = new Function(`return (${assignedLiteral('FIELDS')})`)();
+const CAPTURE_KINDS = new Function(`return (${assignedLiteral('CAPTURE_KINDS')})`)();
+
+assert.deepEqual(
+  TYPES.filter(({ id }) => ['memo', 'inspiration', 'idea', 'sound'].includes(id)),
+  [
+    { id: 'memo', e: '💭', l: '메모' },
+    { id: 'inspiration', e: '💡', l: '영감' },
+    { id: 'idea', e: '📒', l: '아이디어' },
+    { id: 'sound', e: '🎧', l: '들은 소리' },
+  ],
+  'collection buttons must be exact independent objects',
+);
 
 assert.doesNotMatch(source, /MEMO_KINDS/, 'memo-kind branching must be removed');
 assert.doesNotMatch(source, /memo\s*:\s*\{[^}]*\[\s*['\"]kind['\"]\s*,\s*['\"]종류['\"]\s*,\s*['\"]sel:/s,
   'generic memo must not show a kind selector');
 
-assert.match(source, /memo\s*:\s*\{\s*\}/, 'generic memo has no extra fields');
-assert.match(source, /inspiration\s*:\s*\{\s*detail\s*:\s*\[\s*\[\s*['\"]perception['\"]\s*,\s*['\"]왜 눈에 띄었나['\"]\s*,\s*['\"]area['\"]\s*\]\s*,\s*\[\s*['\"]source['\"]\s*,\s*['\"]출처['\"]\s*,\s*['\"]text['\"]\s*\]/s,
-  'inspiration fields must stay on inspiration');
-assert.match(source, /idea\s*:\s*\{\s*detail\s*:\s*\[\s*\[\s*['\"]title['\"]\s*,\s*['\"]제목['\"]\s*,\s*['\"]text['\"]\s*\]\s*,\s*\[\s*['\"]note['\"]\s*,\s*['\"]비고['\"]\s*,\s*['\"]area['\"]\s*\]/s,
-  'idea fields must stay on idea');
-for (const key of ['place', 'sound', 'situation', 'observation', 'mood']) {
-  assert.match(source, new RegExp(`sound\\s*:\\s*\\{[\\s\\S]*?['\"]${key}['\"]`), `sound must include ${key}`);
-}
-
-for (const [id, kind] of [['inspiration', '영감'], ['idea', '아이디어'], ['sound', '사운드']]) {
-  assert.match(source, new RegExp(`${id}\\s*:\\s*['\"]${kind}['\"]`), `${id} must map to ${kind}`);
-}
+assert.deepEqual(FIELDS.memo, {}, 'generic memo has no extra fields');
+assert.deepEqual(FIELDS.inspiration, {
+  detail: [['perception', '왜 눈에 띄었나', 'area'], ['source', '출처', 'text']],
+}, 'inspiration fields must stay on inspiration');
+assert.deepEqual(FIELDS.idea, {
+  detail: [['title', '제목', 'text'], ['note', '비고', 'area']],
+}, 'idea fields must stay on idea');
+assert.deepEqual(FIELDS.sound, {
+  detail: [
+    ['place', '장소', 'text'], ['sound', '소리', 'text'],
+    ['situation', '상황', 'area'], ['observation', '관찰', 'area'],
+    ['mood', '기분', 'text'],
+  ],
+}, 'sound fields must stay on sound');
+assert.deepEqual(CAPTURE_KINDS, {
+  inspiration: '영감', idea: '아이디어', sound: '사운드',
+}, 'collection UI types must map to the exact legacy kinds');
 assert.match(source, /type\s*:\s*CAPTURE_KINDS\[uiType\]\s*\?\s*['\"]memo['\"]\s*:\s*uiType/,
   'collection submissions must remap to legacy memo payloads');
 assert.match(source, /if\s*\(CAPTURE_KINDS\[uiType\]\)\s*p\.kind\s*=\s*CAPTURE_KINDS\[uiType\]/,
