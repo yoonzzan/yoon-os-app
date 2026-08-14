@@ -461,8 +461,11 @@ async function loadProjects(force){
   }
 }
 
+/* GitHub API 는 Cache-Control: private, max-age=60 을 준다. 그대로 두면 보기 탭을
+   열어도 최대 60초 동안 브라우저가 옛 records.json 을 재사용한다. Actions 반영이
+   30초쯤 걸리므로 둘이 겹치면 방금 넣은 기록이 90초까지 안 보인다. */
 async function loadData(){
-  const j = await gh('records.json?ref=' + (cfg.branch || 'main'));
+  const j = await gh('records.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
   const d = JSON.parse(b64decode(j.content));
   DATA = d; ls.set(LS.d, d);
   return d;
@@ -616,7 +619,8 @@ async function submit(payload, okMsg){
   ls.set(LS.r, rec.slice(0,20)); renderRecent();
   /* 여기서 끝난 건 capture/pending 에 올린 것까지다. 실제 반영은 Actions 가 나중에 한다.
      '저장됨' 은 반영 완료로 읽혀서, 그 사이 실패해도 성공한 줄 알게 된다. */
-  try{ await putCapture(payload); toast(okMsg || '기록함 · 곧 반영'); }
+  /* '곧' 이 얼마인지 없으면 저장 직후 보기 탭을 열고 없다고 여긴다 (2026-08-14 실제) */
+  try{ await putCapture(payload); toast(okMsg || '기록함 · 30초쯤 뒤 보기 탭에'); }
   catch(e){
     const q = ls.get(LS.q, []); q.push(payload); ls.set(LS.q, q);
     renderQueue(); renderRecent();                     // 방금 줄에 대기 표시를 붙인다
@@ -666,7 +670,7 @@ $('mo-save').onclick = async () => {
   const p = collect('mo-detail', collect('mo-fields', { type:'morning' }));
   if(!p.agenda && !p.keyword) return toast('안건이나 키워드를 적어주세요', true);
   p.body = [p.keyword, p.agenda].filter(Boolean).join(' / ');
-  await submit(p, '아침 기록함 · 곧 반영');
+  await submit(p, '아침 기록함 · 30초쯤 뒤 보기 탭에');
   clearFields('mo-fields','mo-detail');
 };
 
@@ -674,7 +678,7 @@ $('ni-save').onclick = async () => {
   const p = collect('ni-detail', collect('ni-fields', { type:'night' }));
   if(!p.today) return toast('오늘 어땠는지 한 줄이라도', true);
   p.body = p.today;
-  await submit(p, '밤 기록함 · 곧 반영');
+  await submit(p, '밤 기록함 · 30초쯤 뒤 보기 탭에');
   clearFields('ni-fields','ni-detail');
 };
 
@@ -682,7 +686,7 @@ $('en-save').onclick = async () => {
   const p = collect('en-fields', { type:'english' });
   if(!p.en && !p.ko) return toast('영어나 한국어 중 하나는 적어주세요', true);
   p.body = p.en || p.ko;
-  await submit(p, '영어일기 기록함 · 곧 반영');
+  await submit(p, '영어일기 기록함 · 30초쯤 뒤 보기 탭에');
   clearFields('en-fields');
 };
 
