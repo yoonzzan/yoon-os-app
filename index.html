@@ -13,7 +13,7 @@
     --bg:#faf9f7; --card:#fff; --ink:#1c1b19; --dim:#7a756e; --line:#e6e2dc;
     --accent:#b9542a; --ok:#3f7d58;
     --c1:#5b7fa6; --c2:#3f7d58; --c3:#b9542a; --c4:#7a6ba6; --c5:#c08a2e; --c6:#4f8f8a;
-    --c7:#a8617e;
+    --c7:#a8617e; --c8:#8a6a4f;
     --sb:env(safe-area-inset-bottom,0px);
     --st:env(safe-area-inset-top,0px);
   }
@@ -129,6 +129,8 @@
   .card p{margin:0;font-size:13.5px;white-space:pre-wrap;
     display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
   .card p.open{-webkit-line-clamp:unset}
+  /* 끝낸 것 — 할일·읽을거리·장소가 done 을 씁니다 */
+  .card.done p{text-decoration:line-through;opacity:.55}
   .card a{display:inline-block;margin-top:8px;font-size:12px;color:var(--accent);
     text-decoration:none;word-break:break-all}
   .card .tg{margin-top:8px;font-size:11px;color:var(--dim)}
@@ -371,15 +373,17 @@ const NIGHT_DETAIL   = [['energy','에너지','sel:⚡⚡⚡|⚡⚡|⚡'],
 const ENGLISH        = [['keyword','키워드','text'], ['en','영어로','area'],
                         ['ko','한국어로','area'], ['words','단어 공부','area']];
 
-const VIEW_TYPES = ['쓸거리','메모','100단어','영어일기','읽을거리','장소','업무','사이드','밤'];
+const VIEW_TYPES = ['할일','쓸거리','메모','100단어','영어일기','읽을거리','장소','업무','사이드','밤'];
 const COLOR = {'쓸거리':'var(--accent)','메모':'var(--c1)','100단어':'var(--c2)','읽을거리':'var(--c4)',
                '장소':'var(--c5)','업무':'var(--c3)','사이드':'var(--c6)','밤':'var(--dim)',
-               '영어일기':'var(--c7)'};
+               '영어일기':'var(--c7)','할일':'var(--c8)'};
 /* 블로그 초안용 — 소재가 주인공, 나머지는 보조 */
 const DIGEST = ['쓸거리','밤','메모','100단어','업무','사이드'];
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
-let st = { type:'memo', q:'', tag:'' };
+/* undone = 위 칸("안 읽은 링크"·"가고싶은 곳")으로 걸렀을 때만 켜집니다.
+   그 칸의 숫자가 처리 안 한 것만 센 값이라, 목록도 같은 기준이어야 합니다 */
+let st = { type:'memo', q:'', tag:'', undone:false };
 
 const $ = id => document.getElementById(id);
 const ls = { get:(k,d)=>{ try{ return JSON.parse(localStorage.getItem(k)) ?? d; }catch(e){ return d; } },
@@ -707,13 +711,16 @@ function renderQuestions(){
 function renderStats(){
   const links = ALL.filter(r => r.type==='읽을거리' && !r.done).length;
   const places = ALL.filter(r => r.type==='장소' && !r.done).length;
+  const on = f => (st.tag===f && st.undone) ? 'on' : '';
   $('stats').innerHTML = `
-    <div class="stat tap ${st.tag==='읽을거리'?'on':''}" data-f="읽을거리">
+    <div class="stat tap ${on('읽을거리')}" data-f="읽을거리">
       <div class="n">${links}</div><div class="l">안 읽은 링크 ›</div></div>
-    <div class="stat tap ${st.tag==='장소'?'on':''}" data-f="장소">
+    <div class="stat tap ${on('장소')}" data-f="장소">
       <div class="n">${places}</div><div class="l">가고싶은 곳 ›</div></div>`;
   $('stats').querySelectorAll('.tap').forEach(b => b.onclick = () => {
-    st.tag = (st.tag === b.dataset.f) ? '' : b.dataset.f;
+    const same = st.tag === b.dataset.f && st.undone;
+    st.tag = same ? '' : b.dataset.f;
+    st.undone = !same;
     renderStats(); renderList();
     $('list').scrollIntoView({ behavior:'smooth', block:'start' });
   });
@@ -724,8 +731,12 @@ function renderChips(){
     const n = t==='전체' ? ALL.length : ALL.filter(r=>r.type===t).length;
     return `<button class="chip ${st.tag===t||(!st.tag&&t==='전체')?'on':''}" data-c="${t}">${t} ${n}</button>`;
   }).join('');
+  /* 위 칸과 같은 st.tag 를 쓰므로 위 칸도 다시 그립니다.
+     안 그리면 위에서 고른 표시가 켜진 채 남아 목록과 어긋납니다 */
   $('chips').querySelectorAll('.chip').forEach(b => b.onclick = () => {
-    st.tag = b.dataset.c==='전체' ? '' : b.dataset.c; renderList();
+    st.tag = b.dataset.c==='전체' ? '' : b.dataset.c;
+    st.undone = false;
+    renderStats(); renderList();
   });
 }
 function card(r){
@@ -735,7 +746,7 @@ function card(r){
         .replace(/\.$/,'')
     : '';
   const det = r.detail || [];
-  return `<article class="card">
+  return `<article class="card${r.done ? ' done' : ''}">
     <div class="meta"><span class="t" style="background:${COLOR[r.type]||'var(--dim)'}">${esc(r.type)}</span>
     <span class="d">${d}${r.saved ? `<em>저장 ${esc(r.saved)}</em>` : ''}</span>
     ${det.length ? `<span class="mk" data-n="${det.length}">＋${det.length}</span>` : ''}</div>
@@ -767,6 +778,7 @@ function renderList(){
   const q = st.q.toLowerCase();
   const list = ALL.filter(r => {
     if(st.tag && r.type!==st.tag) return false;
+    if(st.undone && r.done) return false;
     if(q && !((r.body||'')+(r.tags||[]).join(' ')).toLowerCase().includes(q)) return false;
     return true;
   }).slice(0,80);
@@ -819,7 +831,8 @@ $('digest').onclick = async () => {
     });
     out += '\n';
   });
-  const links = ALL.filter(r=>r.type==='링크' && !r.done).slice(0,10);
+  /* 타입 이름은 '읽을거리' 다. '링크' 로 걸러 늘 0건이라 이 묶음에 안 붙고 있었다 */
+  const links = ALL.filter(r=>r.type==='읽을거리' && !r.done).slice(0,10);
   if(links.length){ out += `### 안 읽은 링크\n`; links.forEach(r=> out += `- ${r.body} ${r.url||''}\n`); }
   try{ await navigator.clipboard.writeText(out); toast('복사됨 — Claude에 붙여넣으세요'); }
   catch(e){ toast('복사 실패', true); }
