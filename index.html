@@ -13,7 +13,7 @@
     --bg:#faf9f7; --card:#fff; --ink:#1c1b19; --dim:#7a756e; --line:#e6e2dc;
     --accent:#b9542a; --ok:#3f7d58;
     --c1:#5b7fa6; --c2:#3f7d58; --c3:#b9542a; --c4:#7a6ba6; --c5:#c08a2e; --c6:#4f8f8a;
-    --c7:#a8617e; --c8:#8a6a4f;
+    --c7:#a8617e; --c8:#8a6a4f; --c9:#6f7a3a;
     --sb:env(safe-area-inset-bottom,0px);
     --st:env(safe-area-inset-top,0px);
   }
@@ -389,12 +389,12 @@ const NIGHT_DETAIL   = [['energy','에너지','sel:⚡⚡⚡|⚡⚡|⚡'],
 const ENGLISH        = [['keyword','키워드','text'], ['en','영어로','area'],
                         ['ko','한국어로','area'], ['words','단어 공부','area']];
 
-const VIEW_TYPES = ['할일','쓸거리','메모','100단어','영어일기','읽을거리','장소','업무','사이드','밤'];
+const VIEW_TYPES = ['할일','쓸거리','메모','영감','100단어','영어일기','읽을거리','장소','업무','사이드','밤'];
 const COLOR = {'쓸거리':'var(--accent)','메모':'var(--c1)','100단어':'var(--c2)','읽을거리':'var(--c4)',
                '장소':'var(--c5)','업무':'var(--c3)','사이드':'var(--c6)','밤':'var(--dim)',
-               '영어일기':'var(--c7)','할일':'var(--c8)'};
+               '영어일기':'var(--c7)','할일':'var(--c8)','영감':'var(--c9)'};
 /* 블로그 초안용 — 소재가 주인공, 나머지는 보조 */
-const DIGEST = ['쓸거리','밤','메모','100단어','업무','사이드'];
+const DIGEST = ['쓸거리','밤','메모','영감','100단어','업무','사이드'];
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
 /* undone = 위 칸("안 읽은 링크"·"가고싶은 곳")으로 걸렀을 때만 켜집니다.
@@ -836,7 +836,7 @@ function renderList(){
   const list = ALL.filter(r => {
     if(st.tag && r.type!==st.tag) return false;
     if(st.undone && r.done) return false;
-    if(q && !((r.body||'')+(r.tags||[]).join(' ')).toLowerCase().includes(q)) return false;
+    if(q && !((r.body||'')+(r.tags||[]).join(' ')+(r.detail||[]).join(' ')).toLowerCase().includes(q)) return false;
     return true;
   }).slice(0,80);
   $('list').innerHTML = list.map(card).join('');
