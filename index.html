@@ -84,7 +84,9 @@
   .recent ul{margin:0;padding:0}
   .recent li{list-style:none;font-size:13px;color:var(--dim);padding:6px 0;
     border-bottom:1px solid var(--line);display:flex;gap:8px}
-  .recent li em{font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .recent li em{flex:1;min-width:0;font-style:normal;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .recent li i{font-style:normal;font-size:12px;opacity:.75;white-space:nowrap}
 
   #plan{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--c6);
     border-radius:0 12px 12px 0;padding:15px 17px;margin-bottom:14px}
@@ -563,10 +565,20 @@ function syncFields(){
                question:'지금 붙잡고 있는 질문' };
   $('q-body').placeholder = ph[t] || '';
 }
+/* 언제 눌렀는지를 함께 보여줍니다. 오늘 것은 시각만, 지난 것은 날짜까지.
+   앱을 새로 깔기 전에 쌓인 기록에는 이 값이 없어 그 줄만 시각이 비어 있습니다 */
+function recentWhen(at){
+  const [d, t] = String(at||'').split(' ');
+  if(!t) return '';
+  return d === nowLocal().slice(0,10) ? t : `${d.slice(5).replace('-','/')} ${t}`;
+}
 function renderRecent(){
   const r = ls.get(LS.r, []).slice(0,6);
   $('recent').innerHTML = r.length
-    ? r.map(x=>`<li><span>${x.e}</span><em>${esc(x.text)}</em></li>`).join('')
+    ? r.map(x => {
+        const w = recentWhen(x.at);
+        return `<li><span>${x.e}</span><em>${esc(x.text)}</em>${w ? `<i>${esc(w)}</i>` : ''}</li>`;
+      }).join('')
     : '<li style="border:none">아직 없습니다</li>';
 }
 function renderQueue(){
@@ -586,7 +598,8 @@ async function submit(payload, okMsg){
   payload.id = newId();
   payload.captured_at = nowLocal();
   const rec = ls.get(LS.r, []);
-  rec.unshift({ e:(TYPES.find(t=>t.id===payload.type)||{}).e || '📝', text:(payload.body||'').slice(0,40) });
+  rec.unshift({ e:(TYPES.find(t=>t.id===payload.type)||{}).e || '📝',
+                text:(payload.body||'').slice(0,40), at:payload.captured_at });
   ls.set(LS.r, rec.slice(0,20)); renderRecent();
   /* 여기서 끝난 건 capture/pending 에 올린 것까지다. 실제 반영은 Actions 가 나중에 한다.
      '저장됨' 은 반영 완료로 읽혀서, 그 사이 실패해도 성공한 줄 알게 된다. */
