@@ -13,6 +13,7 @@
     --bg:#faf9f7; --card:#fff; --ink:#1c1b19; --dim:#7a756e; --line:#e6e2dc;
     --accent:#b9542a; --ok:#3f7d58;
     --c1:#5b7fa6; --c2:#3f7d58; --c3:#b9542a; --c4:#7a6ba6; --c5:#c08a2e; --c6:#4f8f8a;
+    --c7:#a8617e;
     --sb:env(safe-area-inset-bottom,0px);
     --st:env(safe-area-inset-top,0px);
   }
@@ -257,10 +258,10 @@ const LS = { cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data'
 
 const TYPES = [
   { id:'memo',  e:'💭', l:'메모'   }, { id:'todo',  e:'✅', l:'할일'   },
-  { id:'money', e:'💰', l:'소비'   }, { id:'link',  e:'🔗', l:'링크'   },
-  { id:'learn', e:'🧩', l:'배움'   }, { id:'place', e:'📍', l:'장소'   },
+  { id:'money', e:'💰', l:'소비'   }, { id:'link',  e:'🔗', l:'읽을거리' },
+  { id:'learn', e:'🧩', l:'100단어' }, { id:'place', e:'📍', l:'장소'   },
   { id:'work',  e:'💼', l:'업무'   }, { id:'side',  e:'🚀', l:'사이드' },
-  { id:'blog',  e:'📝', l:'소재'   },
+  { id:'blog',  e:'📝', l:'쓸거리'  },
   /* 열두가지 좋아하는 질문 — 날짜 로그가 아니라 12개로 완결되는 목록이다.
      새 줄을 덧붙이지 않고 표의 빈 번호를 채운다 */
   { id:'question', e:'❓', l:'질문' }
@@ -363,11 +364,12 @@ const NIGHT_DETAIL   = [['energy','에너지','sel:⚡⚡⚡|⚡⚡|⚡'],
 const ENGLISH        = [['keyword','키워드','text'], ['en','영어로','area'],
                         ['ko','한국어로','area'], ['words','단어 공부','area']];
 
-const VIEW_TYPES = ['소재','메모','배움','링크','장소','업무','사이드','밤'];
-const COLOR = {'소재':'var(--accent)','메모':'var(--c1)','배움':'var(--c2)','링크':'var(--c4)',
-               '장소':'var(--c5)','업무':'var(--c3)','사이드':'var(--c6)','밤':'var(--dim)'};
+const VIEW_TYPES = ['쓸거리','메모','100단어','영어일기','읽을거리','장소','업무','사이드','밤'];
+const COLOR = {'쓸거리':'var(--accent)','메모':'var(--c1)','100단어':'var(--c2)','읽을거리':'var(--c4)',
+               '장소':'var(--c5)','업무':'var(--c3)','사이드':'var(--c6)','밤':'var(--dim)',
+               '영어일기':'var(--c7)'};
 /* 블로그 초안용 — 소재가 주인공, 나머지는 보조 */
-const DIGEST = ['소재','밤','메모','배움','업무','사이드'];
+const DIGEST = ['쓸거리','밤','메모','100단어','업무','사이드'];
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
 let st = { type:'memo', q:'', tag:'' };
@@ -544,9 +546,9 @@ function syncFields(){
   $('q-more').textContent = '＋ 상세 입력';
 
   const ph = { memo:'무슨 일이든 · 영감 · 아이디어 · 들은 소리', todo:'할 일 하나',
-               money:'아메리카노 4500', link:'링크 붙여넣기', learn:'단어나 배운 것',
+               money:'아메리카노 4500', link:'링크 붙여넣기 — 책·도서관 자료도', learn:'기억하고 싶은 단어나 표현',
                place:'가게 이름', work:'업무 메모', side:'사이드 프로젝트 메모',
-               blog:'블로그에 쓸 이야기 — 짧은 줄바꿈으로 편하게',
+               blog:'나중에 쓸 이야기 — 짧은 줄바꿈으로 편하게',
                question:'지금 붙잡고 있는 질문' };
   $('q-body').placeholder = ph[t] || '';
 }
@@ -696,10 +698,10 @@ function renderQuestions(){
 
 /* 지금 처리할 것만 위에 둡니다. 눌러서 거를 수 있는 두 칸입니다. */
 function renderStats(){
-  const links = ALL.filter(r => r.type==='링크' && !r.done).length;
+  const links = ALL.filter(r => r.type==='읽을거리' && !r.done).length;
   const places = ALL.filter(r => r.type==='장소' && !r.done).length;
   $('stats').innerHTML = `
-    <div class="stat tap ${st.tag==='링크'?'on':''}" data-f="링크">
+    <div class="stat tap ${st.tag==='읽을거리'?'on':''}" data-f="읽을거리">
       <div class="n">${links}</div><div class="l">안 읽은 링크 ›</div></div>
     <div class="stat tap ${st.tag==='장소'?'on':''}" data-f="장소">
       <div class="n">${places}</div><div class="l">가고싶은 곳 ›</div></div>`;
@@ -745,7 +747,7 @@ function renderList(){
   $('list').innerHTML = list.map(card).join('');
   $('empty').hidden = list.length>0;
   bind($('list'));
-  ['링크','장소'].forEach((t,i) => {
+  ['읽을거리','장소'].forEach((t,i) => {
     const id = i===0 ? 'link' : 'place';
     const g = ALL.filter(r => r.type===t && !r.done).slice(0,10);
     $('s-'+id).hidden = !g.length;
