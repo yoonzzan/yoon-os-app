@@ -333,7 +333,10 @@ const FIELDS = {
                    ['why','왜 저장했는지','area'],
                    ['read_start','읽기 시작','text']] },
   learn: { detail:[['source','출처','text'], ['note','비고','area']] },
-  place: { detail:[['why','가야할 이유','area'], ['kind','구분','sel:식당|카페|문화|숙소|기타'],
+  /* 구분 9종의 정본은 life-os 의 CLAUDE.md 「장소 구분 9종」 절이다.
+     태그로 그대로 붙으므로(12_lifeos 는 여기서 공백을 치환하지 않는다) 값에 공백을 넣지 않는다 */
+  place: { detail:[['why','가야할 이유','area'],
+                   ['kind','구분','sel:식당|카페|술집·바|베이커리·디저트|문화|전시|자연·산책|숙소|기타'],
                    ['station','가까운 역','text'], ['url','URL','text']] },
   work:  { basic:[['project','프로젝트','proj']] },
   side:  { basic:[['project','프로젝트','proj']] },
