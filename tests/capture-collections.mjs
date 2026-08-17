@@ -50,6 +50,45 @@ function assignedLiteral(name) {
   assert.fail(`${name} literal must be balanced`);
 }
 
+function namedFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const bodyStart = source.indexOf('{', start);
+  assert.notEqual(bodyStart, -1, `${name} must have a body`);
+  let depth = 0;
+  let quote = '';
+  for (let i = bodyStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      i = source.indexOf('\n', i + 2);
+      assert.notEqual(i, -1, `${name} has an unterminated line comment`);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      i = source.indexOf('*/', i + 2);
+      assert.notEqual(i, -1, `${name} has an unterminated block comment`);
+      i += 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`${name} function must be balanced`);
+}
+
 const TYPES = new Function(`return (${assignedLiteral('TYPES')})`)();
 const FIELDS = new Function(`return (${assignedLiteral('FIELDS')})`)();
 const CAPTURE_KINDS = new Function(`return (${assignedLiteral('CAPTURE_KINDS')})`)();
@@ -100,5 +139,26 @@ for (const label of ['아이디어', '들은 소리']) {
 }
 assert.match(source, /\(r\.detail\|\|\[\]\)\.join\(['\"] ['\"]\)/,
   'record detail must remain searchable');
+
+const prepareRecords = new Function('DATA', `
+  let ALL = [];
+  ${namedFunction('recordDate')}
+  ${namedFunction('recordSavedAt')}
+  ${namedFunction('prepData')}
+  prepData();
+  return ALL;
+`);
+const prepared = prepareRecords({ records: [
+  { body: 'early', date: '2026-08-17', saved: '08:00' },
+  { body: 'saved next day', date: '2026-08-16', saved: '08-17 20:00' },
+  { body: 'missing time', date: '2026-08-17', saved: '' },
+  { body: 'late', date: '2026-08-17', saved: '18:00' },
+  { body: 'yesterday', date: '2026-08-16', saved: '23:59' },
+] });
+assert.deepEqual(
+  prepared.map(({ body }) => body),
+  ['saved next day', 'late', 'early', 'missing time', 'yesterday'],
+  'view cards must sort by the actual saved timestamp newest first',
+);
 
 console.log('capture collection contracts pass');

@@ -700,9 +700,23 @@ $('en-save').onclick = async () => {
 };
 
 /* ---------- 보기 ---------- */
+function recordDate(r){
+  const date = new Date(String(r.date||'').replace(/-/g,'/'));
+  return Number.isNaN(date.getTime()) ? new Date(0) : date;
+}
+function recordSavedAt(r, recordDate){
+  const saved = String(r.saved||'').trim();
+  let raw = '';
+  if(/^\d{2}:\d{2}$/.test(saved)) raw = `${r.date} ${saved}`;
+  else if(/^\d{2}-\d{2} \d{2}:\d{2}$/.test(saved)) raw = `${String(r.date||'').slice(0,4)}-${saved}`;
+  const savedAt = new Date(raw.replace(/-/g,'/'));
+  return raw && !Number.isNaN(savedAt.getTime()) ? savedAt.getTime() : recordDate.getTime();
+}
 function prepData(){
-  ALL = (DATA.records||[]).map(r => ({...r, _d:new Date(String(r.date).replace(/-/g,'/'))}))
-                          .sort((a,b) => b._d - a._d);
+  ALL = (DATA.records||[]).map((r, order) => {
+    const _d = recordDate(r);
+    return {...r, _d, _at:recordSavedAt(r, _d), _order:order};
+  }).sort((a,b) => b._at - a._at || a._order - b._order);
 }
 function renderPlan(){
   const p = DATA.plan;
