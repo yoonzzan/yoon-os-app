@@ -113,7 +113,9 @@ assert.deepEqual(FIELDS.inspiration, {
   detail: [['perception', '왜 눈에 띄었나', 'area'], ['source', '출처', 'text']],
 }, 'inspiration fields must stay on inspiration');
 assert.deepEqual(FIELDS.idea, {
-  detail: [['title', '제목', 'text'], ['note', '비고', 'area']],
+  basic: [['gubun', '구분', 'sel:업무|사이드프로젝트|일상|기타'],
+          ['title', '제목', 'text']],
+  detail: [['note', '비고', 'area']],
 }, 'idea fields must stay on idea');
 assert.deepEqual(FIELDS.sound, {
   detail: [

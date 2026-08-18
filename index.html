@@ -319,7 +319,9 @@ const CAPTURE_KINDS = { inspiration:'영감', idea:'아이디어', sound:'사운
 const FIELDS = {
   memo:  {},
   inspiration: { detail:[['perception','왜 눈에 띄었나','area'], ['source','출처','text']] },
-  idea: { detail:[['title','제목','text'], ['note','비고','area']] },
+  idea: { basic:[['gubun','구분','sel:업무|사이드프로젝트|일상|기타'],
+                 ['title','제목','text']],
+          detail:[['note','비고','area']] },
   sound: { detail:[['place','장소','text'], ['sound','소리','text'],
                    ['situation','상황','area'], ['observation','관찰','area'],
                    ['mood','기분','text']] },
