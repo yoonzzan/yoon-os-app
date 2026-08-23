@@ -142,8 +142,13 @@ for (const label of ['아이디어', '들은 소리']) {
 assert.match(source, /\(r\.detail\|\|\[\]\)\.join\(['\"] ['\"]\)/,
   'record detail must remain searchable');
 
-const prepareRecords = new Function('DATA', `
+const prepareRecords = new Function('DATA', 'ENRICH', `
   let ALL = [];
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateEnrichments')}
+  ${namedFunction('composeRecords')}
+  ${namedFunction('resolveConnection')}
+  ${namedFunction('resolveConnections')}
   ${namedFunction('recordDate')}
   ${namedFunction('recordSavedAt')}
   ${namedFunction('prepData')}
@@ -156,7 +161,7 @@ const prepared = prepareRecords({ records: [
   { body: 'missing time', date: '2026-08-17', saved: '' },
   { body: 'late', date: '2026-08-17', saved: '18:00' },
   { body: 'yesterday', date: '2026-08-16', saved: '23:59' },
-] });
+] }, { schema_version: 1, records: {} });
 assert.deepEqual(
   prepared.map(({ body }) => body),
   ['saved next day', 'late', 'early', 'missing time', 'yesterday'],
