@@ -172,7 +172,6 @@
   .card .dt dt{color:var(--dim);white-space:nowrap}
   .card .dt dd{margin:0;word-break:break-word}
   .card .dt dd.free{grid-column:1 / -1}
-  .card .mk{margin-left:auto;font-size:10.5px;color:var(--accent);white-space:nowrap}
   .blk{margin-top:24px}
   .blk h3{font-size:14px;margin:0 0 10px}
 
@@ -1165,7 +1164,7 @@ function recordSearchText(record){
 }
 function toggleCardDetails(open){
   const next = !open;
-  return { open:next, expanded:String(next), hidden:!next, marker:next ? '접기' : '상세 보기' };
+  return { open:next, expanded:String(next), hidden:!next };
 }
 function renderProvenance(entries){
   const labels = {
@@ -1402,7 +1401,7 @@ function card(r){
     <div class="meta"><span class="t" style="background:${COLOR[r.type]||'var(--dim)'}">${esc(r.type)}</span>
     <span class="d">${d}${r.saved ? `<em>저장 ${esc(r.saved)}</em>` : ''}</span>
     ${r.enrichmentStatus ? `<span class="enrich-status ${statusClass}">${esc(statusLabel(r.enrichmentStatus))}</span>` : ''}
-    ${details ? `<span class="mk">상세 보기</span>` : ''}</div>
+    </div>
     <p${details ? ` class="card-body" role="button" tabindex="0" aria-expanded="false" aria-controls="${esc(detailsId)}"` : ''}>${esc(r.body||'')}</p>
     ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(host(r.url))}</a>` : ''}
     ${(r.displayTags||[]).length ? `<div class="tg">#${r.displayTags.map(esc).join(' #')}</div>` : ''}
@@ -1454,14 +1453,13 @@ async function submitCardEnrichment(cardElement, trigger){
 function bind(el){
   el.querySelectorAll('.card').forEach(c => {
     const p = c.querySelector('p'); if(!p) return;
-    const dl = c.querySelector('.dt'), mk = c.querySelector('.mk');
+    const dl = c.querySelector('.dt');
     if(!dl) return;
     const setDetails = open => {
       const next = toggleCardDetails(open);
       p.classList.toggle('open', next.open);
       p.setAttribute('aria-expanded', next.expanded);
       dl.hidden = next.hidden;
-      if(mk) mk.textContent = next.marker;
     };
     p.onclick = () => setDetails(p.getAttribute('aria-expanded') === 'true');
     p.onkeydown = event => {

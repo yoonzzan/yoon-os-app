@@ -361,11 +361,12 @@ assert.match(viewContracts.recordSearchText({ body: '기록', displayTags: [], d
 ] }), /생활 OS/, 'resolved related labels must be searchable');
 
 assert.deepEqual(viewContracts.toggleCardDetails(false), {
-  open: true, expanded: 'true', hidden: false, marker: '접기',
+  open: true, expanded: 'true', hidden: false,
 }, 'collapsed card details must transition to accessible expanded markup state');
 assert.deepEqual(viewContracts.toggleCardDetails(true), {
-  open: false, expanded: 'false', hidden: true, marker: '상세 보기',
+  open: false, expanded: 'false', hidden: true,
 }, 'expanded card details must transition back to accessible collapsed markup state');
+assert.doesNotMatch(source, /class="mk"|상세 보기|접기/, 'card details must use the card body as the only visible toggle affordance');
 const provenanceHtml = viewContracts.renderProvenance([{
   actor: 'user', provider: 'openai-codex', model_requested: 'configured', model_reported: 'reported',
   accepted_at: '2026-08-21T10:00:00Z', confidence: 0.9, reason: 'completed', secret: '<do-not-render>',
