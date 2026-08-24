@@ -609,6 +609,10 @@ assert.match(privacyControls, /data-enrich-action="allow_redacted"/, 'privacy co
 assert.match(privacyControls, /data-enrich-action="allow_original"/, 'privacy controls include original permission');
 assert.match(privacyControls, /data-enrich-action="skip_enrichment"/, 'privacy controls include skip permission');
 assert.doesNotMatch(privacyControls, /add_tag|add_connection/, 'privacy controls must not mix in ordinary correction actions');
+const pendingControls = controlContracts.renderEnrichmentControls({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', {
+  targets:{ records:{}, projects:{} },
+});
+assert.equal(pendingControls, '', 'ordinary correction controls stay hidden until automatic enrichment completes');
 controlStore.set('er', { 'rec-a':{
   event_id:'event-future', state:'rejected', reason:'future_safe_reason',
 } });
@@ -808,10 +812,9 @@ assert.deepEqual(completedPrivacy.privacyDecision, {
   action:'allow_redacted', source_hash:HASH_A, redaction_version:3,
 }, 'the completed projection retains the exact redacted-analysis scope');
 
-assert.match(html, /<input\s+type="text"\s+id="q-tags"\s+placeholder="태그 \(선택\)"\s+maxlength="16384">/,
-  'shadow mode retains the dedicated q-tags capture field');
-assert.match(source, /const p = \{ type:CAPTURE_KINDS\[uiType\] \? 'memo' : uiType,\s*body:raw, tags:\$\('q-tags'\)\.value\.trim\(\) \};/,
-  'shadow-mode enrichment must not change the dedicated capture tags payload');
+assert.doesNotMatch(html, /id="q-tags"/, 'quick capture must not expose a manual tag field before automatic enrichment');
+assert.match(source, /const p = \{ type:CAPTURE_KINDS\[uiType\] \? 'memo' : uiType,\s*body:raw \};/,
+  'quick capture sends no manual tag before automatic enrichment');
 assert.match(source, /q:'yz-queue'[\s\S]*eq:'yz-enrich-queue'/,
   'capture and enrichment queues remain distinct throughout pre-cutover shadow mode');
 
