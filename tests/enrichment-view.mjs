@@ -1,0 +1,818 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const html = readFileSync(resolve(import.meta.dirname, '..', 'index.html'), 'utf8');
+const match = html.match(/<script>([\s\S]*?)<\/script>/);
+assert.ok(match, 'index.html must contain an inline script');
+const source = match[1];
+
+function namedFunction(name) {
+  const functionStart = source.indexOf(`function ${name}(`);
+  assert.notEqual(functionStart, -1, `${name} must exist`);
+  const start = source.slice(Math.max(0, functionStart - 6), functionStart) === 'async '
+    ? functionStart - 6 : functionStart;
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  let quote = '';
+  for (let i = bodyStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '/' && next === '/') { i = source.indexOf('\n', i + 2); continue; }
+    if (char === '/' && next === '*') { i = source.indexOf('*/', i + 2) + 1; continue; }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue; }
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`${name} function must be balanced`);
+}
+
+function assignedLiteral(name) {
+  const assignment = new RegExp(`\\bconst\\s+${name}\\s*=\\s*`).exec(source);
+  assert.ok(assignment, `${name} must be assigned`);
+  const start = assignment.index + assignment[0].length;
+  const pairs = { '{': '}', '[': ']' };
+  assert.ok(source[start] in pairs, `${name} must use an object or array literal`);
+  const stack = [];
+  let quote = '';
+  for (let i = start; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (char === '\\') i += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '/' && next === '/') { i = source.indexOf('\n', i + 2); continue; }
+    if (char === '/' && next === '*') { i = source.indexOf('*/', i + 2) + 1; continue; }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue; }
+    if (char in pairs) stack.push(pairs[char]);
+    else if (char === stack.at(-1)) {
+      stack.pop();
+      if (!stack.length) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`${name} literal must be balanced`);
+}
+
+const { composeRecords, validateEnrichments } = new Function(`
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateEnrichments')}
+  ${namedFunction('composeRecords')}
+  return { composeRecords, validateEnrichments };
+`)();
+
+const HASH_A = `sha256-${'a'.repeat(64)}`;
+const HASH_B = `sha256-${'b'.repeat(64)}`;
+const fixturePath = resolve(import.meta.dirname, 'projector-sidecar.fixture.json');
+const projectorRoot = process.env.LIFE_OS_ROOT
+  || resolve(import.meta.dirname, '..', '..', 'automatic-record-enrichment');
+function projectCurrentFixture() {
+  const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
+  const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
+  if(existsSync(generator)){
+    const generated = JSON.parse(execFileSync('python3', [generator], {
+      cwd:projectorRoot, encoding:'utf8',
+    }));
+    assert.deepEqual(generated, checkedIn,
+      'the checked-in app fixture must match the canonical Python projector output');
+  }
+  return checkedIn;
+}
+const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
+const sidecar = { schema_version: 1, records: {
+  'rec-a': { record_id: 'rec-a', source_hash: HASH_A, status: 'completed',
+    status_reason: 'completed', prompt_version: 1, redaction_version: 1,
+    tags: [{ value: '수동', origin: 'source' }, { value: '자동분류', origin: 'auto' }],
+    connections: [], event_receipts: {}, applied_event_ids: [], provenance: [] }
+} };
+
+assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
+const canonicalProjection = projectCurrentFixture();
+assert.equal(validateEnrichments(canonicalProjection).ok, true,
+  'the strict browser validator must accept the canonical project_current output');
+assert.deepEqual(composeRecords([
+  { record_id:'rec-a', source_hash:HASH_A, tags:['Source Tag'], body:'본문' },
+], canonicalProjection)[0].displayTags, ['수동', '자동분류'],
+  'the actual projector fixture must feed the browser composition without a copied contract');
+const canonicalWithExtraTargetField = structuredClone(canonicalProjection);
+canonicalWithExtraTargetField.targets.records['rec-a'].unexpected = 'must-not-pass';
+assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
+  'target catalog entries must reject fields outside the reduced projector contract');
+assert.deepEqual(composeRecords(
+  [{ record_id: 'rec-a', source_hash: 'sha256-a', tags: ['수동'] }],
+  { schema_version: 1, records: { 'rec-a': {
+    source_hash: 'sha256-a', status: 'completed', redaction_version: 1,
+    tags: [{ value: '수동', origin: 'source' }, { value: '자동분류', origin: 'auto' }],
+    connections: [], event_receipts: {}
+  } } }
+)[0].displayTags, ['수동', '자동분류'],
+  'composition joins a schema-v1 projection only by the exact record and source IDs');
+assert.deepEqual(composeRecords(records, sidecar)[0].displayTags, ['수동', '자동분류'],
+  'a valid projection must display exactly its projected tags');
+assert.deepEqual(composeRecords(records, sidecar)[0].tags, ['수동'],
+  'composition must retain raw tags separately for diagnostics and compatibility');
+
+const removedSourceTag = structuredClone(sidecar);
+removedSourceTag.records['rec-a'].tags = [];
+assert.deepEqual(composeRecords(records, removedSourceTag)[0].displayTags, [],
+  'an empty projected tag list must preserve a user removal of a source tag');
+
+assert.deepEqual(composeRecords(records, null)[0].displayTags, ['수동'],
+  'an absent sidecar must preserve raw tags');
+assert.deepEqual(composeRecords(records, { schema_version: 2, records: {} })[0].displayTags, ['수동'],
+  'an unsupported sidecar must preserve raw tags');
+
+const mismatched = structuredClone(sidecar);
+mismatched.records['rec-a'].source_hash = HASH_B;
+assert.deepEqual(composeRecords(records, mismatched)[0].displayTags, ['수동'],
+  'a mismatched source hash must preserve raw tags');
+
+const unknown = structuredClone(sidecar);
+unknown.records['rec-b'] = unknown.records['rec-a'];
+delete unknown.records['rec-a'];
+assert.deepEqual(composeRecords(records, unknown)[0].displayTags, ['수동'],
+  'an unknown record ID must not alter a raw record');
+
+const duplicated = structuredClone(sidecar);
+duplicated.records['rec-a'].tags = [
+  { value: ' 자동분류 ', origin: 'auto' }, { value: '#자동분류', origin: 'user' },
+];
+assert.equal(validateEnrichments(duplicated).ok, false,
+  'duplicate normalized projected tags must invalidate a sidecar before it is composed');
+assert.deepEqual(composeRecords(records, validateEnrichments(duplicated).value)[0].displayTags, ['수동'],
+  'duplicate normalized projected tags make a sidecar invalid and must preserve raw tags');
+
+function makeSidecarLoader(gh, cache, decode = text => text) {
+  return new Function('gh', 'b64decode', 'ls', 'cfg', `
+    const LS = { e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at' };
+    let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+    let enrichmentLoadState = 'unavailable';
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('validateEnrichments')}
+    function reconcileEnrichmentPending(){}
+    ${namedFunction('loadEnrichments')}
+    return async () => { await loadEnrichments(); return { ENRICH, enrichmentLoadState }; };
+  `)(gh, decode, {
+    get: (key, fallback) => cache.get(key) ?? fallback,
+    set: (key, value) => cache.set(key, value),
+  }, { branch: 'main' });
+}
+
+const cache = new Map([['yz-enrich', sidecar]]);
+const cached = await makeSidecarLoader(async () => { throw new Error('offline'); }, cache)();
+assert.equal(cached.enrichmentLoadState, 'cached', 'a remote failure may use only a valid cached sidecar');
+assert.deepEqual(composeRecords(records, cached.ENRICH)[0].displayTags, ['수동', '자동분류'],
+  'a cached compatible sidecar must not discard the original raw record');
+
+const staleCache = new Map([['yz-enrich', mismatched]]);
+const cachedMismatch = await makeSidecarLoader(async () => { throw new Error('offline'); }, staleCache)();
+assert.deepEqual(composeRecords(records, cachedMismatch.ENRICH)[0].displayTags, ['수동'],
+  'a cached sidecar with a mismatched source hash must preserve raw tags');
+
+const invalidWithCache = await makeSidecarLoader(async () => ({ content: JSON.stringify({ schema_version: 2, records: {} }) }), cache)();
+assert.equal(invalidWithCache.enrichmentLoadState, 'incompatible',
+  'an incompatible remote schema must not be masked by cache');
+assert.deepEqual(composeRecords(records, invalidWithCache.ENRICH)[0].displayTags, ['수동'],
+  'an incompatible sidecar must preserve raw tags even when a cache exists');
+
+const malformedWithCache = await makeSidecarLoader(async () => ({ content: '{not-json' }), cache)();
+assert.equal(malformedWithCache.enrichmentLoadState, 'incompatible',
+  'a decoded JSON failure must not fall back to a stale cached projection');
+assert.deepEqual(composeRecords(records, malformedWithCache.ENRICH)[0].displayTags, ['수동'],
+  'a decoded JSON failure must preserve raw tags');
+
+const invalidBase64WithCache = await makeSidecarLoader(
+  async () => ({ content: 'not-base64' }), cache, () => { throw new Error('invalid base64'); }
+)();
+assert.equal(invalidBase64WithCache.enrichmentLoadState, 'incompatible',
+  'a base64 decode failure must not fall back to a stale cached projection');
+
+function makeReceiptSidecarLoader(gh, seed, decode = text => text) {
+  return new Function('gh', 'b64decode', 'seed', 'cfg', `
+    const LS = { e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at',
+      ep:'yz-enrich-pending', er:'yz-enrich-results' };
+    let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+    let enrichmentLoadState = 'unavailable', pendingWrites = 0;
+    const ls = {
+      get: (key, fallback) => seed.has(key) ? structuredClone(seed.get(key)) : fallback,
+      set: (key, value) => { if(key === LS.ep) pendingWrites += 1; seed.set(key, structuredClone(value)); },
+    };
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('validateEnrichments')}
+    ${namedFunction('resolveEnrichmentReceipt')}
+    ${namedFunction('reconcileEnrichmentPending')}
+    ${namedFunction('loadEnrichments')}
+    return async () => {
+      await loadEnrichments();
+      return { ENRICH, enrichmentLoadState, pending:ls.get(LS.ep, {}),
+        results:ls.get(LS.er, {}), pendingWrites };
+    };
+  `)(gh, decode, seed, { branch:'main' });
+}
+
+const cachedAppliedSidecar = structuredClone(sidecar);
+cachedAppliedSidecar.records['rec-a'].event_receipts = {
+  'event-123': { status:'applied', safe_reason:'applied' },
+};
+const cachedAppliedSeed = new Map([
+  ['yz-enrich', cachedAppliedSidecar],
+  ['yz-enrich-pending', { 'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' } }],
+]);
+const cachedApplied = await makeReceiptSidecarLoader(async () => { throw new Error('offline'); }, cachedAppliedSeed)();
+assert.equal(cachedApplied.enrichmentLoadState, 'cached', 'a valid cached sidecar remains a usable receipt source');
+assert.deepEqual(cachedApplied.pending, {}, 'a cached same-record applied receipt must clear pending state');
+assert.deepEqual(cachedApplied.results['rec-a'], {
+  event_id:'event-123', state:'applied', reason:'applied',
+}, 'an applied receipt must persist a fixed per-record UI result before clearing pending');
+assert.equal(cachedApplied.pendingWrites, 1, 'a validated cached sidecar must reconcile exactly once');
+
+const cachedRejectedSidecar = structuredClone(sidecar);
+cachedRejectedSidecar.records['rec-a'].event_receipts = {
+  'event-123': { status:'rejected', safe_reason:'invalid_introduction_metadata' },
+};
+const cachedRejectedSeed = new Map([
+  ['yz-enrich', cachedRejectedSidecar],
+  ['yz-enrich-pending', { 'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' } }],
+]);
+const cachedRejected = await makeReceiptSidecarLoader(async () => { throw new Error('offline'); }, cachedRejectedSeed)();
+assert.equal(cachedRejected.enrichmentLoadState, 'cached', 'a safe but unlabelled rejection code remains schema-valid');
+assert.deepEqual(cachedRejected.pending, {}, 'a cached same-record rejected receipt must clear pending state');
+assert.deepEqual(cachedRejected.results['rec-a'], {
+  event_id:'event-123', state:'rejected', reason:'invalid_introduction_metadata',
+}, 'a rejected receipt must persist a safe per-record UI result before clearing pending');
+assert.equal(cachedRejected.pendingWrites, 1, 'a validated cached rejected receipt must reconcile exactly once');
+
+const remoteAppliedSeed = new Map([['yz-enrich-pending', {
+  'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' },
+}]]);
+const remoteApplied = await makeReceiptSidecarLoader(async () => ({ content:JSON.stringify(cachedAppliedSidecar) }), remoteAppliedSeed)();
+assert.deepEqual(remoteApplied.pending, {}, 'a validated remote sidecar must reconcile same-record receipts');
+assert.equal(remoteApplied.pendingWrites, 1, 'a validated remote sidecar must reconcile exactly once');
+
+for(const [name, gh, seed] of [
+  ['unavailable', async () => { throw new Error('offline'); }, new Map([['yz-enrich-pending', {
+    'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' },
+  }]])],
+  ['incompatible', async () => ({ content:JSON.stringify({ schema_version:2, records:{} }) }), new Map([['yz-enrich-pending', {
+    'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' },
+  }]])],
+]){
+  const result = await makeReceiptSidecarLoader(gh, seed)();
+  assert.deepEqual(result.pending, { 'event-123':{ event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'queued' } },
+    `${name} sidecars must not falsely resolve pending events`);
+  assert.equal(result.pendingWrites, 0, `${name} sidecars must not reconcile`);
+}
+
+const provenanceWithUnexpectedField = structuredClone(sidecar);
+provenanceWithUnexpectedField.records['rec-a'].provenance = [{
+  actor: 'user', provider: 'openai-codex', model_requested: 'configured',
+  model_reported: 'reported', accepted_at: '2026-08-21T10:00:00Z',
+  confidence: 0.9, reason: 'completed', secret: 'must-not-pass'
+}];
+assert.equal(validateEnrichments(provenanceWithUnexpectedField).ok, false,
+  'provenance with a non-allowlisted field must make the sidecar incompatible');
+
+const provenanceWithWrongType = structuredClone(sidecar);
+provenanceWithWrongType.records['rec-a'].provenance = [{ actor: 1 }];
+assert.equal(validateEnrichments(provenanceWithWrongType).ok, false,
+  'provenance with wrong field types must make the sidecar incompatible');
+
+const validProvenance = structuredClone(sidecar);
+validProvenance.records['rec-a'].provenance = [{
+  actor: 'user', provider: 'openai-codex', model_requested: 'configured',
+  model_reported: 'reported', accepted_at: '2026-08-21T10:00:00Z',
+  confidence: 0.9, reason: 'completed'
+}];
+assert.deepEqual(validateEnrichments(validProvenance).value.records['rec-a'].provenance, validProvenance.records['rec-a'].provenance,
+  'only documented, well-typed provenance fields may be preserved');
+
+const STATUS_LABEL = new Function(`return (${assignedLiteral('STATUS_LABEL')})`)();
+const STATUS_REASON_LABEL = new Function(`return (${assignedLiteral('STATUS_REASON_LABEL')})`)();
+const viewContracts = new Function('esc', `
+  const STATUS_LABEL = ${JSON.stringify(STATUS_LABEL)};
+  const STATUS_REASON_LABEL = ${JSON.stringify(STATUS_REASON_LABEL)};
+  ${namedFunction('statusLabel')}
+  ${namedFunction('statusReasonLabel')}
+  ${namedFunction('enrichmentWarning')}
+  ${namedFunction('resolveConnection')}
+  ${namedFunction('resolveConnections')}
+  ${namedFunction('recordSearchText')}
+  ${namedFunction('toggleCardDetails')}
+  ${namedFunction('renderProvenance')}
+  return {
+    statusLabel, statusReasonLabel, enrichmentWarning, resolveConnection, resolveConnections,
+    recordSearchText, toggleCardDetails, renderProvenance
+  };
+`)(value => String(value).replace(/[&<>"']/g, char => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[char])));
+
+assert.deepEqual(Object.keys(STATUS_LABEL).sort(), [
+  'completed', 'failed', 'pending', 'privacy_review_required', 'retry_wait', 'skipped',
+], 'the six sidecar statuses must have fixed display labels');
+for (const [status, label] of Object.entries(STATUS_LABEL)) {
+  assert.equal(viewContracts.statusLabel(status), label, `${status} must use its fixed escaped label`);
+  assert.equal(viewContracts.statusLabel(`<img src=x onerror=${status}>`), '상태 확인 필요',
+    'an unknown status must never become card HTML');
+}
+assert.equal(viewContracts.statusReasonLabel('provider_timeout'), STATUS_REASON_LABEL.provider_timeout,
+  'documented safe reasons must use their fixed labels');
+assert.equal(viewContracts.statusReasonLabel('<img src=x onerror=alert(1)>'), '상태 확인 필요',
+  'an unknown reason must never be rendered verbatim');
+
+assert.equal(viewContracts.enrichmentWarning('loaded'), '', 'a current sidecar needs no warning');
+assert.equal(viewContracts.enrichmentWarning('cached'), '자동 분석 상태가 최신이 아닐 수 있음',
+  'cached sidecar state must be visible');
+for (const state of ['unavailable', 'incompatible']) {
+  assert.equal(viewContracts.enrichmentWarning(state), '자동 분석 상태를 불러오지 못함',
+    `${state} sidecar state must leave raw records viewable with a warning`);
+}
+
+const connectionRecords = [
+  { record_id: 'rec-a', body: '원본 연결 제목' },
+  { record_id: 'rec-b', body: '연결된 기록 본문' },
+];
+const projects = { 'project-a': { title: '생활 OS' } };
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind: 'record', target_id: 'rec-b', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects,
+), { label: '연결된 기록 본문', href: '#record-rec-b' },
+  'record connections must resolve only against current raw records');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind: 'project', target_id: 'project-a', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects,
+), { label: '생활 OS', href: '' },
+  'project connections must resolve only against the projected project catalog');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind: 'record', target_id: 'gone', origin: 'auto' }, connectionRecords, projects,
+), { label: '대상 없음', href: '' }, 'unknown targets must not render a link');
+assert.match(viewContracts.recordSearchText({ body: '기록', displayTags: [], detail: [], relatedItems: [
+  { label: '생활 OS', href: '' },
+] }), /생활 OS/, 'resolved related labels must be searchable');
+
+assert.deepEqual(viewContracts.toggleCardDetails(false), {
+  open: true, expanded: 'true', hidden: false, marker: '접기',
+}, 'collapsed card details must transition to accessible expanded markup state');
+assert.deepEqual(viewContracts.toggleCardDetails(true), {
+  open: false, expanded: 'false', hidden: true, marker: '상세 보기',
+}, 'expanded card details must transition back to accessible collapsed markup state');
+const provenanceHtml = viewContracts.renderProvenance([{
+  actor: 'user', provider: 'openai-codex', model_requested: 'configured', model_reported: 'reported',
+  accepted_at: '2026-08-21T10:00:00Z', confidence: 0.9, reason: 'completed', secret: '<do-not-render>',
+}]);
+assert.match(provenanceHtml, /openai-codex/, 'allowlisted provenance is visible only through its fixed fields');
+assert.doesNotMatch(provenanceHtml, /do-not-render|secret/, 'non-allowlisted provenance must never enter detail markup');
+
+const eventContracts = new Function(`
+  const STATUS_REASON_LABEL = ${JSON.stringify(STATUS_REASON_LABEL)};
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('buildEnrichmentEvent')}
+  ${namedFunction('canonicalizeQueuedEnrichment')}
+  ${namedFunction('enrichmentRejectionLabel')}
+  ${namedFunction('resolveEnrichmentReceipt')}
+  return {
+    buildEnrichmentEvent, canonicalizeQueuedEnrichment, enrichmentRejectionLabel,
+    resolveEnrichmentReceipt,
+  };
+`)();
+
+const EVENT_TIME = '2026-08-23T10:11:12+09:00';
+const eventRecord = {
+  record_id: 'rec-a', source_hash: HASH_A, redaction_version: 3,
+};
+const eventCatalog = {
+  records: [eventRecord, { record_id: 'rec-b', source_hash: HASH_B, redaction_version: 1 }],
+  projects: { 'project-a': { title: '생활 OS' } },
+};
+const eventBase = { event_id: 'event-123', client_created_at: EVENT_TIME, record:eventRecord };
+
+const addTag = eventContracts.buildEnrichmentEvent('add_tag', {
+  ...eventBase, tag:' ##  새로운   태그 ', origin:'forbidden', provider:'forbidden',
+}, eventCatalog);
+assert.equal(addTag.ok, true, 'a current record may build an add-tag correction');
+assert.deepEqual(addTag.value, {
+  schema_version:1, event_id:'event-123', record_id:'rec-a', source_hash:HASH_A,
+  action:'add_tag', client_created_at:EVENT_TIME, tag:'새로운 태그',
+}, 'the add-tag builder must emit its exact schema-v1 allowlist only');
+assert.deepEqual(Object.keys(eventContracts.buildEnrichmentEvent('remove_tag', {
+  ...eventBase, tag:'#새로운 태그',
+}, eventCatalog).value).sort(), [
+  'action', 'client_created_at', 'event_id', 'record_id', 'schema_version', 'source_hash', 'tag',
+], 'remove-tag must not serialize a redaction scope or server-derived fields');
+
+for(const [action, extra, keys] of [
+  ['add_connection', { connection:{ kind:'record', target_id:'rec-b' } },
+    ['action','client_created_at','connection','event_id','record_id','schema_version','source_hash']],
+  ['remove_connection', { connection:{ kind:'project', target_id:'project-a' } },
+    ['action','client_created_at','connection','event_id','record_id','schema_version','source_hash']],
+  ['allow_redacted', {},
+    ['action','client_created_at','event_id','record_id','redaction_version','schema_version','source_hash']],
+  ['allow_original', {},
+    ['action','client_created_at','event_id','record_id','redaction_version','schema_version','source_hash']],
+  ['skip_enrichment', {},
+    ['action','client_created_at','event_id','record_id','redaction_version','schema_version','source_hash']],
+]){
+  const built = eventContracts.buildEnrichmentEvent(action, { ...eventBase, ...extra }, eventCatalog);
+  assert.equal(built.ok, true, `${action} must have an allowlisted builder`);
+  assert.deepEqual(Object.keys(built.value).sort(), keys, `${action} must emit exact schema-v1 keys`);
+  assert.equal(built.value.redaction_version ?? 3, 3, `${action} must use the current redaction scope when scoped`);
+}
+const oldPrivacyChoice = eventContracts.buildEnrichmentEvent('allow_redacted', eventBase, eventCatalog).value;
+assert.equal(eventContracts.canonicalizeQueuedEnrichment({
+  ...oldPrivacyChoice, redaction_version:2,
+}, eventCatalog).ok, false,
+  'an offline privacy choice must expire instead of being rewritten onto a newer redaction version');
+assert.equal(eventContracts.buildEnrichmentEvent('add_connection', {
+  ...eventBase, connection:{ kind:'record', target_id:'missing' },
+}, eventCatalog).ok, false, 'a connection target must exist in the current record catalog');
+assert.equal(eventContracts.buildEnrichmentEvent('add_connection', {
+  ...eventBase, connection:{ kind:'record', target_id:'rec-a' },
+}, eventCatalog).ok, false, 'a record cannot be connected to itself');
+assert.deepEqual(eventContracts.buildEnrichmentEvent('add_tag', {
+  ...eventBase, record:{ ...eventRecord, source_hash:HASH_B }, tag:'tag',
+}, eventCatalog).value.source_hash, HASH_B,
+  'record-scoped corrections preserve the source hash they were created against');
+assert.equal(eventContracts.buildEnrichmentEvent('set_processing_status', eventBase, eventCatalog).ok, false,
+  'the browser may not construct worker-only actions');
+
+const canonicalQueued = eventContracts.canonicalizeQueuedEnrichment({
+  ...addTag.value, injected:'must-not-survive', source_hash:HASH_A,
+}, eventCatalog);
+assert.deepEqual(canonicalQueued, addTag,
+  'queued entries must be rebuilt through the action allowlist before transport');
+const changedRecordCatalog = {
+  ...eventCatalog,
+  records:eventCatalog.records.map(record => record.record_id === 'rec-a'
+    ? { ...record, source_hash:HASH_B, redaction_version:4 } : record),
+};
+assert.deepEqual(eventContracts.canonicalizeQueuedEnrichment(addTag.value, changedRecordCatalog), addTag,
+  'queued tag corrections remain record-scoped and preserve their original source hash');
+const queuedConnection = eventContracts.buildEnrichmentEvent('add_connection', {
+  ...eventBase, connection:{ kind:'project', target_id:'project-a' },
+}, eventCatalog);
+assert.deepEqual(eventContracts.canonicalizeQueuedEnrichment(queuedConnection.value, changedRecordCatalog),
+  queuedConnection, 'queued connection corrections remain record-scoped after a source change');
+assert.equal(eventContracts.canonicalizeQueuedEnrichment(oldPrivacyChoice, changedRecordCatalog).ok, false,
+  'queued privacy decisions remain source-and-redaction scoped after a source change');
+assert.equal(eventContracts.canonicalizeQueuedEnrichment({
+  ...addTag.value, record_id:'gone', source_hash:HASH_A,
+}, eventCatalog).ok, false, 'a queued entry for an unknown record must be quarantined');
+
+const receipts = {
+  schema_version:1, records:{
+    'rec-a': { event_receipts:{ 'event-123':{ status:'applied', safe_reason:'applied' } } },
+    'rec-b': { event_receipts:{ 'event-other':{ status:'rejected', safe_reason:'stale_scope' } } },
+  }, targets:{ records:{}, projects:{} },
+};
+assert.deepEqual(eventContracts.resolveEnrichmentReceipt({ event_id:'event-123', record_id:'rec-a' }, receipts), {
+  state:'applied', reason:'applied',
+}, 'only an applied receipt on the same record resolves a queued event');
+assert.deepEqual(eventContracts.resolveEnrichmentReceipt({ event_id:'event-other', record_id:'rec-a' }, receipts), {
+  state:'rejected', reason:'projection_inconsistent',
+}, 'a receipt on another record must be rejected as incompatible');
+assert.deepEqual(eventContracts.resolveEnrichmentReceipt({ event_id:'event-missing', record_id:'rec-a' }, receipts), {
+  state:'waiting', reason:'',
+}, 'PUT success must remain waiting until the same-record receipt exists');
+assert.deepEqual(eventContracts.resolveEnrichmentReceipt({ event_id:'event-other', record_id:'rec-b' }, receipts), {
+  state:'rejected', reason:'stale_scope',
+}, 'a same-record rejected receipt clears waiting with a safe reason only');
+const futureSafeReceipt = structuredClone(receipts);
+futureSafeReceipt.records['rec-a'].event_receipts['event-future'] = {
+  status:'rejected', safe_reason:'future_safe_reason',
+};
+assert.deepEqual(eventContracts.resolveEnrichmentReceipt({ event_id:'event-future', record_id:'rec-a' }, futureSafeReceipt), {
+  state:'rejected', reason:'future_safe_reason',
+}, 'a bounded future backend reason resolves instead of leaving the event waiting');
+assert.equal(eventContracts.enrichmentRejectionLabel('stale_scope'), STATUS_REASON_LABEL.stale_scope,
+  'known rejection reasons must have fixed display labels');
+assert.equal(eventContracts.enrichmentRejectionLabel('<raw failure>'), '반영 실패',
+  'unknown rejection reasons must not enter the UI');
+assert.equal(eventContracts.enrichmentRejectionLabel('invalid_introduction_metadata'), '반영 실패',
+  'a schema-safe but unlabelled rejection reason must use the fixed failure label');
+
+const putCalls = [];
+const putContract = new Function('gh', 'b64encode', 'cfg', `
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('buildEnrichmentEvent')}
+  ${namedFunction('canonicalizeQueuedEnrichment')}
+  ${namedFunction('putEnrichment')}
+  return putEnrichment;
+`)(async (path, options) => { putCalls.push({ path, options }); return {}; }, value => `encoded:${value}`, {});
+await putContract(addTag.value, eventCatalog);
+assert.equal(putCalls.length, 1, 'a valid enrichment event may issue one PUT');
+assert.equal(putCalls[0].path, 'enrichment/pending/event-123.json',
+  'enrichment transport must write only its immutable pending event path');
+assert.deepEqual(JSON.parse(putCalls[0].options.body).message, 'enrichment: add_tag event-123',
+  'the commit message may contain only the safe action and event ID');
+
+function makeMemoryStore(seed = {}) {
+  const state = new Map(Object.entries(seed));
+  return {
+    state,
+    get: (key, fallback) => state.has(key) ? structuredClone(state.get(key)) : fallback,
+    set: (key, value) => state.set(key, structuredClone(value)),
+  };
+}
+function makeQueueContracts(store, put) {
+  return new Function('ls', 'putEnrichment', 'ALL', 'ENRICH', `
+    const LS = { eq:'eq', ex:'ex', ep:'ep', er:'er' };
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('buildEnrichmentEvent')}
+    ${namedFunction('canonicalizeQueuedEnrichment')}
+    ${namedFunction('currentEnrichmentCatalog')}
+    ${namedFunction('quarantineEnrichment')}
+    ${namedFunction('markEnrichmentPending')}
+    ${namedFunction('flushEnrichments')}
+    ${namedFunction('queueEnrichment')}
+    ${namedFunction('submitEnrichmentEvent')}
+    return { flushEnrichments, queueEnrichment, submitEnrichmentEvent };
+  `)(store, put, eventCatalog.records, { targets:{ projects:eventCatalog.projects } });
+}
+
+const offlineStore = makeMemoryStore();
+const offline = makeQueueContracts(offlineStore, async () => { throw new Error('offline'); });
+const offlineResult = await offline.submitEnrichmentEvent('add_tag', {
+  ...eventBase, tag:'offline tag',
+});
+assert.equal(offlineResult.transport, 'offline', 'a transport failure must keep the correction in the separate offline queue');
+assert.deepEqual(offlineStore.get('eq', []), [{
+  schema_version:1, event_id:'event-123', record_id:'rec-a', source_hash:HASH_A,
+  action:'add_tag', client_created_at:EVENT_TIME, tag:'offline tag',
+}], 'offline queue entries must retain only the canonical event schema');
+assert.deepEqual(offlineStore.get('ep', {})['event-123'], {
+  event_id:'event-123', record_id:'rec-a', source_hash:HASH_A, transport:'offline',
+}, 'offline storage must mark delivery as pending rather than applied');
+
+const uploaded = [];
+const flushStore = makeMemoryStore({ eq:[
+  { event_id:'event-tampered', record_id:'rec-a', source_hash:HASH_A, action:'invented', secret:'must-not-copy' },
+  { ...addTag.value, injected:'must-not-upload' },
+] });
+const flushing = makeQueueContracts(flushStore, async entry => { uploaded.push(entry); return entry; });
+await flushing.flushEnrichments(false);
+assert.equal(uploaded.length, 1, 'a malformed local queue entry must not block a later valid event');
+assert.deepEqual(uploaded[0], addTag.value, 'the later valid event must be rebuilt without tampered fields');
+assert.deepEqual(flushStore.get('ex', []), [{ event_id:'event-tampered', reason:'invalid_action' }],
+  'local quarantine must retain only the safe event ID and reason');
+assert.deepEqual(flushStore.get('eq', []), [], 'a successful queued PUT is removed from the offline queue');
+assert.equal(flushStore.get('ep', {})['event-123'].transport, 'queued',
+  'a successful PUT is queued for projection, never treated as applied');
+
+const controlStore = makeMemoryStore();
+const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
+  const LS = { er:'er' };
+  ${namedFunction('privacyDecisionIsCurrent')}
+  ${namedFunction('enrichmentRejectionLabel')}
+  ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('enrichmentControlState')}
+  ${namedFunction('connectionCandidates')}
+  ${namedFunction('renderEnrichmentControls')}
+  return { privacyDecisionIsCurrent, enrichmentControlState, connectionCandidates, renderEnrichmentControls };
+`)(value => String(value).replace(/[&<>"']/g, char => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[char])), controlStore, STATUS_REASON_LABEL);
+
+const editableRecord = {
+  record_id:'rec-a', source_hash:HASH_A, redaction_version:3, enrichmentStatus:'completed',
+  displayTags:['하나'], connections:[],
+};
+assert.deepEqual(controlContracts.enrichmentControlState(editableRecord, 'loaded'), {
+  enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_connection','remove_connection'],
+  tagSlots:2, connectionSlots:3,
+}, 'a compatible, currently scoped ordinary record exposes compact correction controls');
+assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, record_id:'' }, 'loaded').enabled, false,
+  'a missing record ID must disable every enrichment action');
+assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, redaction_version:0 }, 'loaded').enabled, false,
+  'a missing current redaction version must disable every enrichment action');
+assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatible').enabled, false,
+  'an incompatible sidecar must not expose write actions');
+
+const privacyRecord = { ...editableRecord, enrichmentStatus:'privacy_review_required' };
+assert.deepEqual(controlContracts.enrichmentControlState(privacyRecord, 'cached'), {
+  enabled:true, mode:'privacy', actions:['allow_redacted','allow_original','skip_enrichment'],
+  tagSlots:2, connectionSlots:3,
+}, 'privacy review exposes exactly the three scope-bound privacy choices from a valid cached sidecar');
+const privacyControls = controlContracts.renderEnrichmentControls(privacyRecord, 'cached', {
+  targets:{ records:{ 'rec-b':{ title:'후보 기록' }, 'rec-a':{ title:'현재 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
+});
+assert.match(privacyControls, /data-enrich-action="allow_redacted"/, 'privacy controls include redacted permission');
+assert.match(privacyControls, /data-enrich-action="allow_original"/, 'privacy controls include original permission');
+assert.match(privacyControls, /data-enrich-action="skip_enrichment"/, 'privacy controls include skip permission');
+assert.doesNotMatch(privacyControls, /add_tag|add_connection/, 'privacy controls must not mix in ordinary correction actions');
+controlStore.set('er', { 'rec-a':{
+  event_id:'event-future', state:'rejected', reason:'future_safe_reason',
+} });
+const rejectedControls = controlContracts.renderEnrichmentControls(editableRecord, 'loaded', {
+  targets:{ records:{}, projects:{} },
+});
+assert.match(rejectedControls, /반영 실패/,
+  'a rejected receipt must remain visible through a fixed per-record result after pending clears');
+assert.doesNotMatch(rejectedControls, /future_safe_reason/,
+  'an unlabelled rejection reason must never render raw text');
+
+assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_redacted', source_hash:HASH_A, redaction_version:3,
+}, editableRecord), true, 'a privacy choice is current only for its exact source and redaction scope');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_redacted', source_hash:HASH_B, redaction_version:3,
+}, editableRecord), false, 'a privacy choice expires when the source changes');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_redacted', source_hash:HASH_A, redaction_version:2,
+}, editableRecord), false, 'a privacy choice expires when redaction changes');
+
+assert.deepEqual(controlContracts.connectionCandidates(editableRecord, {
+  targets:{ records:{ 'rec-a':{ title:'현재 기록' }, 'rec-b':{ title:'후보 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
+}), [
+  { kind:'record', target_id:'rec-b', label:'후보 기록' },
+  { kind:'project', target_id:'project-a', label:'생활 OS' },
+], 'connection controls must offer only sidecar catalog candidates and never the current record');
+
+const tagLimitControls = controlContracts.renderEnrichmentControls({
+  ...editableRecord, displayTags:['하나','둘','셋'],
+}, 'loaded', { targets:{ records:{}, projects:{} } });
+assert.match(tagLimitControls, /data-enrich-add-tag[^>]*disabled/, 'adding tags is disabled after three projected tags');
+
+/* Pre-cutover E2E fixture. This intentionally joins the actual loader, composition,
+   correction queue, and receipt reconciliation functions rather than re-stating their
+   behaviour with isolated stubs. */
+function makePreCutoverApp(records, initialSidecar) {
+  const store = makeMemoryStore();
+  let remoteSidecar = structuredClone(initialSidecar);
+  const uploads = [];
+  const app = new Function('gh', 'b64decode', 'ls', 'putEnrichment', 'cfg', 'DATA', `
+    const LS = { d:'capture-data', q:'capture-queue', e:'sidecar', ee:'sidecar-etag', ea:'sidecar-at',
+      eq:'enrichment-queue', ex:'enrichment-quarantine', ep:'enrichment-pending' };
+    let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+    let enrichmentLoadState = 'unavailable', ALL = [];
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('buildEnrichmentEvent')}
+    ${namedFunction('canonicalizeQueuedEnrichment')}
+    ${namedFunction('resolveEnrichmentReceipt')}
+    ${namedFunction('validateEnrichments')}
+    ${namedFunction('composeRecords')}
+    ${namedFunction('resolveConnection')}
+    ${namedFunction('resolveConnections')}
+    ${namedFunction('recordDate')}
+    ${namedFunction('recordSavedAt')}
+    ${namedFunction('prepData')}
+    ${namedFunction('currentEnrichmentCatalog')}
+    ${namedFunction('quarantineEnrichment')}
+    ${namedFunction('markEnrichmentPending')}
+    ${namedFunction('flushEnrichments')}
+    ${namedFunction('queueEnrichment')}
+    ${namedFunction('submitEnrichmentEvent')}
+    ${namedFunction('reconcileEnrichmentPending')}
+    ${namedFunction('loadEnrichments')}
+    ${namedFunction('loadData')}
+    return {
+      loadData, submitEnrichmentEvent,
+      snapshot(){ return { ALL:structuredClone(ALL), ENRICH:structuredClone(ENRICH),
+        enrichmentLoadState, pending:ls.get(LS.ep, {}), offline:ls.get(LS.eq, []),
+        quarantined:ls.get(LS.ex, []) }; }
+    };
+  `)(async path => {
+    if(path.startsWith('records.json')) return { content:JSON.stringify({ records }) };
+    if(path.startsWith('record-enrichments.json')) return { content:JSON.stringify(remoteSidecar) };
+    throw new Error(`unexpected fixture request: ${path}`);
+  }, value => value, store, async entry => {
+    uploads.push(structuredClone(entry));
+    return entry;
+  }, { branch:'main' }, { records });
+  return { app, uploads, setRemote: value => { remoteSidecar = structuredClone(value); } };
+}
+
+function preCutoverRecord({ status = 'completed', reason = 'completed', tags = [], connections = [],
+  receipts = {}, privacyDecision = undefined } = {}) {
+  const record = {
+    record_id:'rec-main', source_hash:HASH_A, status, status_reason:reason,
+    prompt_version:1, redaction_version:3,
+    tags, connections, event_receipts:receipts, applied_event_ids:[], provenance:[],
+  };
+  if(privacyDecision !== undefined) record.privacy_decision = privacyDecision;
+  return record;
+}
+function preCutoverSidecar(record) {
+  return { schema_version:1, records:{ 'rec-main':record }, targets:{
+    records:{ 'rec-related':{ title:'관련 기록' } }, projects:{ 'project-life':{ title:'생활 OS' } },
+  } };
+}
+
+const preCutoverRecords = [
+  { record_id:'rec-main', source_hash:HASH_A, tags:['기존 태그'], body:'수정할 기록', date:'2026-08-23' },
+  { record_id:'rec-related', source_hash:HASH_B, tags:[], body:'관련 기록 원문', date:'2026-08-22' },
+];
+const automaticProjection = preCutoverSidecar(preCutoverRecord({
+  tags:[{ value:'자동 태그', origin:'auto' }],
+  connections:[{ kind:'record', target_id:'rec-related', origin:'auto' }],
+}));
+const preCutover = makePreCutoverApp(preCutoverRecords, automaticProjection);
+
+await preCutover.app.loadData();
+let snapshot = preCutover.app.snapshot();
+assert.equal(snapshot.enrichmentLoadState, 'loaded', 'the E2E fixture must load records and the current sidecar');
+assert.deepEqual(snapshot.ALL.find(record => record.record_id === 'rec-main').displayTags, ['자동 태그'],
+  'the pre-cutover view must render the auto tag rather than merging raw manual tags');
+assert.deepEqual(snapshot.ALL.find(record => record.record_id === 'rec-main').connections, [
+  { kind:'record', target_id:'rec-related', origin:'auto' },
+], 'the pre-cutover view must render the typed connection');
+
+const removeResult = await preCutover.app.submitEnrichmentEvent('remove_tag', {
+  event_id:'event-remove-auto', client_created_at:EVENT_TIME,
+  record:snapshot.ALL.find(record => record.record_id === 'rec-main'), tag:'자동 태그',
+});
+assert.equal(removeResult.transport, 'queued', 'a user tag removal remains pending after delivery, not applied');
+assert.deepEqual(preCutover.uploads, [{
+  schema_version:1, event_id:'event-remove-auto', record_id:'rec-main', source_hash:HASH_A,
+  action:'remove_tag', client_created_at:EVENT_TIME, tag:'자동 태그',
+}], 'the queued removal must retain the exact dedicated enrichment payload');
+assert.equal(preCutover.app.snapshot().pending['event-remove-auto'].transport, 'queued',
+  'the view keeps the correction at 반영 대기 until a matching receipt is projected');
+
+preCutover.setRemote(preCutoverSidecar(preCutoverRecord({
+  tags:[], connections:[], receipts:{ 'event-remove-auto':{ status:'applied', safe_reason:'applied' } },
+})));
+await preCutover.app.loadData();
+snapshot = preCutover.app.snapshot();
+assert.deepEqual(snapshot.pending, {}, 'an applied same-record receipt removes the queued correction');
+assert.deepEqual(snapshot.ALL.find(record => record.record_id === 'rec-main').displayTags, [],
+  'an applied removal replaces 반영 대기 with the corrected final projection');
+
+const rejected = makePreCutoverApp(preCutoverRecords, automaticProjection);
+await rejected.app.loadData();
+snapshot = rejected.app.snapshot();
+await rejected.app.submitEnrichmentEvent('remove_tag', {
+  event_id:'event-reject-auto', client_created_at:EVENT_TIME,
+  record:snapshot.ALL.find(record => record.record_id === 'rec-main'), tag:'자동 태그',
+});
+rejected.setRemote(preCutoverSidecar(preCutoverRecord({
+  tags:[{ value:'자동 태그', origin:'auto' }],
+  connections:[{ kind:'record', target_id:'rec-related', origin:'auto' }],
+  receipts:{ 'event-reject-auto':{ status:'rejected', safe_reason:'stale_scope' } },
+})));
+await rejected.app.loadData();
+snapshot = rejected.app.snapshot();
+assert.deepEqual(snapshot.pending, {}, 'a rejected same-record receipt also resolves the local waiting state');
+assert.deepEqual(snapshot.ALL.find(record => record.record_id === 'rec-main').displayTags, ['자동 태그'],
+  'a rejected removal must leave the authoritative projected tag unchanged');
+
+const privacyStart = preCutoverSidecar(preCutoverRecord({
+  status:'privacy_review_required', reason:'privacy_review_required',
+  tags:[{ value:'가린 태그', origin:'auto' }],
+}));
+const privacy = makePreCutoverApp(preCutoverRecords, privacyStart);
+await privacy.app.loadData();
+snapshot = privacy.app.snapshot();
+const flowPrivacyRecord = snapshot.ALL.find(record => record.record_id === 'rec-main');
+assert.equal(flowPrivacyRecord.enrichmentStatus, 'privacy_review_required',
+  'the E2E fixture starts from the privacy-review state');
+const allowRedacted = await privacy.app.submitEnrichmentEvent('allow_redacted', {
+  event_id:'event-allow-redacted', client_created_at:EVENT_TIME, record:flowPrivacyRecord,
+});
+assert.equal(allowRedacted.transport, 'queued', 'redacted analysis permission must remain pending after delivery');
+assert.deepEqual(privacy.app.snapshot().pending['event-allow-redacted'], {
+  event_id:'event-allow-redacted', record_id:'rec-main', source_hash:HASH_A, transport:'queued',
+}, 'the privacy decision uses the separate enrichment pending store');
+
+privacy.setRemote(preCutoverSidecar(preCutoverRecord({
+  status:'pending', reason:'pending', tags:[{ value:'가린 태그', origin:'auto' }],
+  privacyDecision:{ action:'allow_redacted', source_hash:HASH_A, redaction_version:3 },
+})));
+await privacy.app.loadData();
+snapshot = privacy.app.snapshot();
+assert.equal(snapshot.ALL.find(record => record.record_id === 'rec-main').enrichmentStatus, 'pending',
+  'redacted permission advances privacy review to the pending analysis projection');
+assert.ok(snapshot.pending['event-allow-redacted'], 'pending analysis does not falsely treat permission delivery as completed');
+
+privacy.setRemote(preCutoverSidecar(preCutoverRecord({
+  status:'completed', reason:'completed', tags:[{ value:'가린 태그', origin:'auto' }],
+  receipts:{ 'event-allow-redacted':{ status:'applied', safe_reason:'applied' } },
+  privacyDecision:{ action:'allow_redacted', source_hash:HASH_A, redaction_version:3 },
+})));
+await privacy.app.loadData();
+snapshot = privacy.app.snapshot();
+const completedPrivacy = snapshot.ALL.find(record => record.record_id === 'rec-main');
+assert.equal(completedPrivacy.enrichmentStatus, 'completed',
+  'the privacy flow reaches the completed projection only after an applied receipt');
+assert.deepEqual(snapshot.pending, {}, 'the completed privacy receipt clears the separate pending state');
+assert.deepEqual(completedPrivacy.privacyDecision, {
+  action:'allow_redacted', source_hash:HASH_A, redaction_version:3,
+}, 'the completed projection retains the exact redacted-analysis scope');
+
+assert.match(html, /<input\s+type="text"\s+id="q-tags"\s+placeholder="태그 \(선택\)"\s+maxlength="16384">/,
+  'shadow mode retains the dedicated q-tags capture field');
+assert.match(source, /const p = \{ type:CAPTURE_KINDS\[uiType\] \? 'memo' : uiType,\s*body:raw, tags:\$\('q-tags'\)\.value\.trim\(\) \};/,
+  'shadow-mode enrichment must not change the dedicated capture tags payload');
+assert.match(source, /q:'yz-queue'[\s\S]*eq:'yz-enrich-queue'/,
+  'capture and enrichment queues remain distinct throughout pre-cutover shadow mode');
+
+console.log('enrichment view contracts pass');
