@@ -245,7 +245,6 @@
       <div id="q-basic"></div>
       <button class="more" id="q-more" hidden>＋ 상세 입력</button>
       <div id="q-detail" hidden></div>
-      <div class="row"><input type="text" id="q-tags" placeholder="태그 (선택)" maxlength="16384"></div>
       <button class="save" id="q-save">저장</button>
       <div class="queue" id="queue"></div>
       <div class="recent"><h4>최근 기록</h4><ul id="recent"></ul></div>
@@ -1060,7 +1059,7 @@ $('q-save').onclick = async () => {
   if(!raw) return toast('내용을 입력하세요', true);
   const uiType = st.type;
   const p = { type:CAPTURE_KINDS[uiType] ? 'memo' : uiType,
-              body:raw, tags:$('q-tags').value.trim() };
+              body:raw };
   if(CAPTURE_KINDS[uiType]) p.kind = CAPTURE_KINDS[uiType];
   collect('q-basic', p); collect('q-detail', p);
 
@@ -1088,7 +1087,7 @@ $('q-save').onclick = async () => {
   $('q-save').disabled = true;
   await submit(p, undefined, uiType);
   $('q-save').disabled = false;
-  $('q-body').value=''; $('q-tags').value='';
+  $('q-body').value='';
   clearFields('q-basic','q-detail');
 };
 
@@ -1251,6 +1250,7 @@ function renderEnrichmentControls(record, sidecarState, enrichments){
   const candidates = connectionCandidates(record, enrichments);
   const tagDisabled = state.tagSlots === 0;
   const connectionDisabled = state.connectionSlots === 0 || candidates.length === 0;
+  if(record.enrichmentStatus !== 'completed') return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
     <h4>수정</h4><p>태그과 연결은 각각 최대 3개까지 반영 요청할 수 있습니다.</p>
     ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map(tag =>
