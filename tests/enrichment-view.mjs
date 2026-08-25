@@ -745,8 +745,10 @@ assert.match(cardContracts.renderRecordMetadata({ ...editableRecord, relatedItem
   { label:'생활 OS', href:'' },
 ], connections:[
   { kind:'record', target_id:'rec-b' }, { kind:'project', target_id:'project-a' },
-] }), /분류·관계 메타데이터[\s\S]*태그[\s\S]*연결[\s\S]*data-focus-record/,
+] }), /분류·관계 메타데이터[\s\S]*태그[\s\S]*metadata-connections[\s\S]*연결[\s\S]*data-focus-record/,
   'metadata has labeled tags and neutral connected-record chips separate from external URLs');
+assert.match(html, /metadata-connections \.metadata-values\{[^}]*flex-wrap:nowrap[^}]*overflow:hidden/,
+  'connection metadata is constrained to a single visible line');
 
 const focusState = { q:'현재 검색', tag:'memo', undone:true };
 const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };

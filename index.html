@@ -154,6 +154,8 @@
   .card .metadata-row{display:flex;align-items:flex-start;gap:8px;margin-top:6px}
   .card .metadata-label{flex:0 0 30px;color:var(--dim);padding-top:4px}
   .card .metadata-values{display:flex;gap:5px;flex-wrap:wrap;min-width:0}
+  .card .metadata-connections .metadata-values{flex-wrap:nowrap;max-height:26px;overflow:hidden}
+  .card .metadata-connections .metadata-chip{flex:0 0 auto;max-width:70vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .card .metadata-chip{display:inline-flex;align-items:center;gap:3px;min-height:24px;padding:2px 7px;border:1px solid var(--line);border-radius:99px;color:var(--ink);background:color-mix(in srgb,var(--card) 88%,var(--line));font-size:11px;text-decoration:none}
   .card button.metadata-chip{cursor:pointer;font:inherit}
   .card .metadata-chip.project::before{content:'▣';color:var(--dim)}
@@ -1318,7 +1320,7 @@ function renderRecordMetadata(record, viewKey='main'){
   const metadataId = recordMetadataDomId(record, viewKey);
   return `<section id="${esc(metadataId)}" class="record-metadata" data-card-metadata hidden aria-label="분류·관계 메타데이터"><h4 class="metadata-title">분류·관계 메타데이터</h4>
     ${tags.length ? `<div class="metadata-row"><span class="metadata-label">태그</span><div class="metadata-values">${tags.map(tag => `<span class="metadata-chip">#${esc(tag)}</span>`).join('')}</div></div>` : ''}
-    ${related.length ? `<div class="metadata-row"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
+    ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
       ? `<button type="button" class="metadata-chip" data-focus-record="${esc(item.connection.target_id)}" aria-label="연결된 기록 ${esc(item.label)} 열기">🔗 ${esc(item.label)}</button>`
       : `<span class="metadata-chip project">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
   </section>`;
