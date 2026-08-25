@@ -661,6 +661,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   ${namedFunction('recordTokenSet')}
   ${namedFunction('rankConnectionCandidates')}
   ${namedFunction('connectionCandidates')}
+  ${namedFunction('recordMetadataDomId')}
   ${namedFunction('renderRecordMetadata')}
   ${namedFunction('renderEnrichmentControls')}
   ${namedFunction('renderEnrichmentEditor')}
@@ -677,8 +678,10 @@ for(const status of ['completed', 'pending', 'skipped']){
   assert.match(rendered, /data-enrich-edit/, `${status} cards always expose an explicit edit button`);
 }
 const detailLessCard = cardContracts.card({ ...editableRecord, type:'memo', body:'상세 없는 긴 본문', date:'2026-08-24', detail:[], relatedItems:[] });
-assert.match(detailLessCard, /<p class="card-body" role="button" tabindex="0" aria-expanded="false">/,
+assert.match(detailLessCard, /<p class="card-body" role="button" tabindex="0" aria-expanded="false" aria-controls="metadata-main-rec-a">/,
   'a detail-less card body still has an accessible tap and keyboard expansion affordance');
+assert.match(detailLessCard, /id="metadata-main-rec-a" class="record-metadata" data-card-metadata hidden/,
+  'tags and connections stay hidden until the card is selected');
 assert.deepEqual(cardContracts.visibleEnrichmentIssue({ enrichmentStatus:'completed' }), null,
   'completed status is not a card-level issue');
 assert.deepEqual(cardContracts.visibleEnrichmentIssue({ enrichmentStatus:'retry_wait' }), {
@@ -701,9 +704,9 @@ for(const status of ['retry_wait', 'failed', 'skipped']){
 }
 const mainCardMarkup = cardContracts.card({ ...editableRecord, type:'memo', body:'동일 기록', date:'2026-08-24', detail:['제목: 원래 필드'], relatedItems:[] }, 'main');
 const subCardMarkup = cardContracts.card({ ...editableRecord, type:'memo', body:'동일 기록', date:'2026-08-24', detail:['제목: 원래 필드'], relatedItems:[] }, 'sub');
-assert.match(mainCardMarkup, /id="record-main-rec-a"[\s\S]*aria-controls="details-main-rec-a"[\s\S]*id="details-main-rec-a"[\s\S]*aria-controls="enrich-editor-main-rec-a"/,
+assert.match(mainCardMarkup, /id="record-main-rec-a"[\s\S]*aria-controls="details-main-rec-a metadata-main-rec-a"[\s\S]*id="details-main-rec-a"[\s\S]*id="metadata-main-rec-a"[\s\S]*aria-controls="enrich-editor-main-rec-a"/,
   'main cards use view-scoped record, detail, and editor IDs');
-assert.match(subCardMarkup, /id="record-sub-rec-a"[\s\S]*aria-controls="details-sub-rec-a"[\s\S]*id="details-sub-rec-a"[\s\S]*aria-controls="enrich-editor-sub-rec-a"/,
+assert.match(subCardMarkup, /id="record-sub-rec-a"[\s\S]*aria-controls="details-sub-rec-a metadata-sub-rec-a"[\s\S]*id="details-sub-rec-a"[\s\S]*id="metadata-sub-rec-a"[\s\S]*aria-controls="enrich-editor-sub-rec-a"/,
   'subview cards use distinct view-scoped IDs and aria controls');
 assert.doesNotMatch(subCardMarkup, /record-main-rec-a|details-main-rec-a|enrich-editor-main-rec-a/,
   'coexisting main and subview cards do not duplicate DOM IDs');
@@ -716,6 +719,12 @@ assert.match(mainCardMarkup, /for="enrich-tag-main-rec-a"[\s\S]*id="enrich-tag-m
 assert.match(subCardMarkup, /for="enrich-tag-sub-rec-a"[\s\S]*id="enrich-tag-sub-rec-a"[\s\S]*id="enrich-connection-search-sub-rec-a"/,
   'subview editor labels target namespaced inputs');
 const bindSource = namedFunction('bind');
+assert.match(bindSource, /const metadata = c\.querySelector\('\[data-card-metadata\]'\)/,
+  'card binding tracks the separately rendered metadata section');
+assert.match(bindSource, /c\.classList\.toggle\('selected', next\.open\)/,
+  'selecting a card makes its metadata state explicit');
+assert.match(bindSource, /metadata\.hidden = !next\.open/,
+  'metadata is revealed only while the card is selected');
 assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
   'namespaced cards never derive a logical record ID from their DOM ID');
 assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
