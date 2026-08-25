@@ -141,15 +141,27 @@
   .card.done p{text-decoration:line-through;opacity:.55}
   .card a{display:inline-block;margin-top:8px;font-size:12px;color:var(--accent);
     text-decoration:none;word-break:break-all}
-  .card .tg{margin-top:8px;font-size:11px;color:var(--dim)}
+  .card .tg{margin:0;font-size:11px;color:var(--dim)}
   .card .enrich-status{margin-left:auto;padding:2px 7px;border-radius:99px;background:var(--line);
     color:var(--dim);font-size:10.5px;font-weight:600;white-space:nowrap}
   .card .enrich-status.ok{background:color-mix(in srgb,var(--ok) 16%,var(--card));color:var(--ok)}
   .card .enrich-status.warn{background:color-mix(in srgb,var(--accent) 14%,var(--card));color:var(--accent)}
   .card .enrich-status.error{background:var(--accent);color:#fff}
-  .card .rel{margin:9px 0 0;padding:0;display:flex;gap:5px;flex-wrap:wrap;list-style:none}
-  .card .rel li{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:99px;padding:2px 7px}
-  .card .rel a{display:inline;margin:0;color:var(--accent);word-break:normal}
+  .card .record-metadata{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);font-size:11px}
+  .card .metadata-title{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .card .metadata-row{display:flex;align-items:flex-start;gap:8px;margin-top:6px}
+  .card .metadata-label{flex:0 0 30px;color:var(--dim);padding-top:4px}
+  .card .metadata-values{display:flex;gap:5px;flex-wrap:wrap;min-width:0}
+  .card .metadata-chip{display:inline-flex;align-items:center;gap:3px;min-height:24px;padding:2px 7px;border:1px solid var(--line);border-radius:99px;color:var(--ink);background:color-mix(in srgb,var(--card) 88%,var(--line));font-size:11px;text-decoration:none}
+  .card button.metadata-chip{cursor:pointer;font:inherit}
+  .card .metadata-chip.project::before{content:'▣';color:var(--dim)}
+  .card .metadata-chip.focused{outline:2px solid var(--accent);outline-offset:2px}
+  .card.focused{outline:2px solid var(--accent);outline-offset:2px}
+  .card .enrichment-issue{margin:7px 0 0;padding:7px 9px;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;background:color-mix(in srgb,var(--accent) 8%,var(--card));font-size:11.5px;color:var(--ink)}
+  .card .enrichment-issue.error{border-left-color:#b43d2f}
+  .card .record-actions{display:flex;justify-content:flex-end;margin-top:10px}
+  .card .record-edit{min-width:44px;min-height:44px;padding:8px 13px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink);font-size:12px;cursor:pointer}
+  .card .record-edit[disabled]{opacity:.5;cursor:not-allowed}
   .card p[role=button]{cursor:pointer}
   .enrich-notice{margin:0 0 10px;padding:8px 11px;border-left:3px solid var(--accent);border-radius:0 9px 9px 0;
     background:var(--card);color:var(--dim);font-size:12px}
@@ -164,8 +176,11 @@
   .enrich-controls button[disabled]{opacity:.5;cursor:not-allowed}
   .enrich-controls .compact-list{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
   .enrich-controls .compact-list span{display:flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid var(--line);border-radius:99px;font-size:11px;color:var(--dim)}
-  .enrich-controls .compact-list button{padding:0;border:none;background:transparent;color:var(--accent);font-size:13px}
+  .enrich-controls .compact-list button{min-width:44px;min-height:44px;padding:0;border:none;background:transparent;color:var(--accent);font-size:13px;display:inline-grid;place-items:center}
   .enrich-feedback{min-height:16px;margin-top:6px;font-size:11.5px;color:var(--dim)}
+  .enrich-search-results{display:grid;gap:5px;margin-top:7px}
+  .enrich-search-result{min-height:44px;padding:6px 9px;text-align:left;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font-size:12px;cursor:pointer}
+  .enrich-search-result small{color:var(--dim);margin-left:5px}
   /* 카드를 탭하면 열리는 상세. records.json 의 detail 을 그린다 */
   .card .dt{margin:10px 0 0;padding-top:9px;border-top:1px solid var(--line);
     display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px}
@@ -1138,6 +1153,13 @@ function enrichmentWarning(state){
   if(state === 'unavailable' || state === 'incompatible') return '자동 분석 상태를 불러오지 못함';
   return '';
 }
+function visibleEnrichmentIssue(record){
+  const messages = {
+    privacy_review_required:'개인정보 확인 필요', retry_wait:'자동 분석 재시도 중', failed:'자동 분석 실패',
+  };
+  const status = record && record.enrichmentStatus;
+  return messages[status] ? { status, message:messages[status] } : null;
+}
 function resolveConnection(connection, records, projects){
   const missing = { label:'대상 없음', href:'' };
   if(!connection || typeof connection !== 'object') return missing;
@@ -1162,26 +1184,21 @@ function recordSearchText(record){
     ...((record && record.relatedItems) || []).map(item => item && item.label)]
     .filter(value => typeof value === 'string').join(' ');
 }
-function toggleCardDetails(open){
-  const next = !open;
-  return { open:next, expanded:String(next), hidden:!next };
-}
+/* Retained for diagnostic compatibility; card rendering intentionally does not call it. */
 function renderProvenance(entries){
-  const labels = {
-    actor:'처리자', provider:'제공자', model_requested:'요청 모델', model_reported:'응답 모델',
-    accepted_at:'기록 시각', confidence:'신뢰도', reason:'사유'
-  };
+  const labels = { actor:'처리자', provider:'제공자', model_requested:'요청 모델', model_reported:'응답 모델', accepted_at:'기록 시각', confidence:'신뢰도', reason:'사유' };
   const rows = [];
   for(const entry of (Array.isArray(entries) ? entries : [])){
     if(!entry || typeof entry !== 'object') continue;
     const values = [];
-    for(const key of ['actor','provider','model_requested','model_reported','accepted_at','confidence','reason']){
-      if(typeof entry[key] === 'string' || typeof entry[key] === 'number')
-        values.push(`${labels[key]}: ${esc(entry[key])}`);
-    }
+    for(const key of Object.keys(labels)) if(typeof entry[key] === 'string' || typeof entry[key] === 'number') values.push(`${labels[key]}: ${esc(entry[key])}`);
     if(values.length) rows.push(`<dd class="free">${values.join(' · ')}</dd>`);
   }
   return rows.length ? `<dt>분석 이력</dt>${rows.join('')}` : '';
+}
+function toggleCardDetails(open){
+  const next = !open;
+  return { open:next, expanded:String(next), hidden:!next };
 }
 /* A decision belongs to the exact content and redaction revision it was made for.
    Keeping the scope in the projected sidecar lets an old permission disappear rather
@@ -1213,27 +1230,44 @@ function enrichmentControlState(record, sidecarState){
     connectionSlots:Math.max(0, 3 - (Array.isArray(record && record.connections) ? record.connections.length : 0)),
   };
 }
-function connectionCandidates(record, enrichments){
+function recordTokenSet(record){
+  return new Set(([record && record.body, ...((record && record.displayTags) || [])].filter(value => typeof value === 'string').join(' ')
+    .normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []));
+}
+function rankConnectionCandidates(record, records, enrichments){
   const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
-  const catalog = [
-    ['record', targets.records && typeof targets.records === 'object' ? targets.records : {}],
-    ['project', targets.projects && typeof targets.projects === 'object' ? targets.projects : {}],
-  ];
+  const catalogRecords = Array.isArray(records) ? records : [];
   const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
     .filter(connection => connection && typeof connection === 'object')
     .map(connection => `${connection.kind}:${connection.target_id}`));
+  const source = recordTokenSet(record), candidates = [];
+  const add = (kind, targetId, label, target, date) => {
+    if(!/^[A-Za-z0-9._-]{1,128}$/.test(targetId) || (kind === 'record' && targetId === record.record_id) || used.has(`${kind}:${targetId}`)) return;
+    const tokens = kind === 'project'
+      ? new Set(String(label || '').normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []) : recordTokenSet(target);
+    const score = [...source].filter(token => tokens.has(token)).length;
+    if(score) candidates.push({ kind, target_id:targetId, label:label || targetId, score,
+      date:kind === 'record' ? recordDate(target).getTime() : 0 });
+  };
+  for(const target of catalogRecords) add('record', target && target.record_id, target && (target.title || target.body), target, target && target.date);
+  for(const [targetId, target] of Object.entries(targets.projects && typeof targets.projects === 'object' ? targets.projects : {}))
+    add('project', targetId, target && target.title, target, '');
+  return candidates.sort((a,b) => b.score-a.score || b.date-a.date || a.target_id.localeCompare(b.target_id)).slice(0,10);
+}
+function connectionCandidates(record, enrichments){
+  const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
+  const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
+    .filter(connection => connection && typeof connection === 'object').map(connection => `${connection.kind}:${connection.target_id}`));
   const candidates = [];
-  for(const [kind, entries] of catalog){
-    for(const [targetId, target] of Object.entries(entries)){
-      if(!/^[A-Za-z0-9._-]{1,128}$/.test(targetId) || (kind === 'record' && targetId === record.record_id)
-         || used.has(`${kind}:${targetId}`)) continue;
-      const label = target && typeof target.title === 'string' && target.title.trim() ? target.title.trim() : targetId;
-      candidates.push({ kind, target_id:targetId, label });
+  for(const [kind, entries] of [['record', targets.records || {}], ['project', targets.projects || {}]]){
+    for(const [target_id, target] of Object.entries(entries)){
+      if((kind === 'record' && target_id === record.record_id) || used.has(`${kind}:${target_id}`)) continue;
+      candidates.push({ kind, target_id, label:(target && target.title) || target_id });
     }
   }
   return candidates;
 }
-function renderEnrichmentControls(record, sidecarState, enrichments){
+function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='main'){
   const state = enrichmentControlState(record, sidecarState);
   if(!state.enabled) return '';
   const id = record.record_id;
@@ -1246,22 +1280,50 @@ function renderEnrichmentControls(record, sidecarState, enrichments){
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
   const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
   const connections = Array.isArray(record.connections) ? record.connections : [];
-  const candidates = connectionCandidates(record, enrichments);
   const tagDisabled = state.tagSlots === 0;
-  const connectionDisabled = state.connectionSlots === 0 || candidates.length === 0;
-  if(record.enrichmentStatus !== 'completed') return '';
+  const connectionDisabled = state.connectionSlots === 0;
+  if(!['completed','retry_wait','failed','skipped'].includes(record.enrichmentStatus)) return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
     <h4>수정</h4><p>태그과 연결은 각각 최대 3개까지 반영 요청할 수 있습니다.</p>
     ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map(tag =>
       `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-enrich-tag="${esc(tag)}" aria-label="${esc(tag)} 태그 삭제">×</button></span>`).join('')}</div>` : ''}
-    <label for="enrich-tag-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="80"${tagDisabled ? ' data-limit-disabled disabled' : ''}>
+    <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="80"${tagDisabled ? ' data-limit-disabled disabled' : ''}>
     <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag"${tagDisabled ? ' data-limit-disabled disabled' : ''}>태그 추가</button></div>
     ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map(connection =>
       `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_connection" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
-    <label for="enrich-connection-${esc(id)}">연결 후보</label><div class="row"><select id="enrich-connection-${esc(id)}" data-upload-control data-enrich-connection aria-label="연결 후보"${connectionDisabled ? ' data-limit-disabled disabled' : ''}>
-      <option value="">연결할 기록 또는 프로젝트</option>${candidates.map(candidate => `<option value="${esc(`${candidate.kind}:${candidate.target_id}`)}">${esc(candidate.label)}</option>`).join('')}</select>
-    <button type="button" data-upload-control data-enrich-action="add_connection"${connectionDisabled ? ' data-limit-disabled disabled' : ''}>연결 추가</button></div>
+    <label>추천 연결</label><div class="enrich-search-results" data-enrich-recommendations></div>
+    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"${connectionDisabled ? ' data-limit-disabled disabled' : ''}><div class="enrich-search-results" data-enrich-search-results></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
+}
+function renderConnectionRecommendations(record, enrichments){
+  const candidates = rankConnectionCandidates(record, ALL, enrichments);
+  const full = (record.connections || []).length >= 3;
+  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}"${full ? ' data-limit-disabled disabled' : ''}>${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
+}
+function renderEnrichmentIssue(record){
+  const issue = visibleEnrichmentIssue(record);
+  if(!issue) return '';
+  return `<section class="enrichment-issue${issue.status === 'failed' ? ' error' : ''}" aria-label="${esc(issue.message)}">⚠ ${esc(issue.message)}</section>`;
+}
+function renderRecordMetadata(record){
+  const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
+  const related = (record.relatedItems || []).map((item, index) => ({ ...item, connection:(record.connections || [])[index] })).filter(item => item && item.label);
+  if(!tags.length && !related.length) return '';
+  return `<section class="record-metadata" aria-label="분류·관계 메타데이터"><h4 class="metadata-title">분류·관계 메타데이터</h4>
+    ${tags.length ? `<div class="metadata-row"><span class="metadata-label">태그</span><div class="metadata-values">${tags.map(tag => `<span class="metadata-chip">#${esc(tag)}</span>`).join('')}</div></div>` : ''}
+    ${related.length ? `<div class="metadata-row"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
+      ? `<button type="button" class="metadata-chip" data-focus-record="${esc(item.connection.target_id)}" aria-label="연결된 기록 ${esc(item.label)} 열기">🔗 ${esc(item.label)}</button>`
+      : `<span class="metadata-chip project">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
+  </section>`;
+}
+function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main'){
+  const state = enrichmentControlState(record, sidecarState);
+  const disabled = !state.enabled || record.enrichmentStatus === 'pending';
+  const panelId = `enrich-editor-${viewKey}-${record.record_id}`;
+  const reason = record.enrichmentStatus === 'pending' ? '분석 완료 전에는 수정할 수 없음' : '분석 상태를 확인한 뒤 수정 가능';
+  const editor = renderEnrichmentControls(record, sidecarState, enrichments, viewKey);
+  return `<div class="record-actions"><button type="button" class="record-edit" data-enrich-edit aria-expanded="false" aria-controls="${esc(panelId)}"${disabled ? ` disabled aria-label="수정 불가: ${reason}"` : ' aria-label="기록 수정"'}>수정</button></div>
+    ${editor ? `<div id="${esc(panelId)}" data-enrich-editor-panel hidden>${editor}</div>` : ''}`;
 }
 function prepData(){
   const sourceRecords = Array.isArray(DATA.records) ? DATA.records : [];
@@ -1333,6 +1395,8 @@ function renderStats(){
    최신 80건까지만 그려서, 2025년에 담아둔 가고싶은 곳이 거기서는 안 보였습니다. */
 const SUB = { '읽을거리':'📖 안 읽은 링크', '장소':'📍 가고싶은 곳' };
 let subType = '';
+let forcedConnectedRecordId = '';
+let highlightedRecordId = '';
 function showSub(type){
   subType = type;
   $('v-view').hidden = true;
@@ -1342,11 +1406,14 @@ function showSub(type){
 }
 function renderSub(){
   if(!subType) return;
-  const g = ALL.filter(r => r.type===subType && !r.done);
+  let g = ALL.filter(r => r.type===subType && !r.done);
+  g = appendForcedConnectedRecord(g, forcedConnectedRecordId, ALL);
+  forcedConnectedRecordId = '';
   $('sub-title').textContent = `${SUB[subType]} ${g.length}`;
-  $('sub-list').innerHTML = g.map(card).join('');
+  $('sub-list').innerHTML = g.map(record => card(record, 'sub')).join('');
   $('sub-empty').hidden = g.length>0;
   bind($('sub-list'));
+  applyConnectedFocus();
 }
 $('sub-back').onclick = () => { subType = ''; showView('view'); };
 function renderChips(){
@@ -1363,7 +1430,7 @@ function renderChips(){
     renderStats(); renderList();
   });
 }
-function card(r){
+function card(r, viewKey='main'){
   // date = 기록이 속한 날짜 · saved = 실제로 저장한 시각
   const d = r._d && r._d.getTime()
     ? r._d.toLocaleDateString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit',weekday:'short'})
@@ -1371,42 +1438,26 @@ function card(r){
     : '';
   const det = r.detail || [];
   const safeRecordId = typeof r.record_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(r.record_id);
-  const detailsId = safeRecordId ? `details-${r.record_id}` : `details-card-${r._order || 0}`;
+  const detailsId = safeRecordId ? `details-${viewKey}-${r.record_id}` : `details-${viewKey}-card-${r._order || 0}`;
   const detailRows = det.map(x => {
     const i = x.indexOf(': ');
     return i > 0
       ? `<dt>${esc(x.slice(0, i))}</dt><dd>${esc(x.slice(i + 2))}</dd>`
       : `<dd class="free">${esc(x)}</dd>`;
   }).join('');
-  const privacyDecisionRow = privacyDecisionIsCurrent(r.privacyDecision, r)
-    ? `<dt>개인정보 선택</dt><dd>${esc({
-      allow_redacted:'가린 내용으로 허용', allow_original:'원문으로 허용', skip_enrichment:'분석 제외'
-    }[r.privacyDecision.action])}</dd>` : '';
-  const enrichmentRows = r.enrichmentStatus ? [
-    `<dt>분석 상태</dt><dd>${esc(statusLabel(r.enrichmentStatus))}</dd>`,
-    `<dt>사유</dt><dd>${esc(statusReasonLabel(r.enrichmentReason))}</dd>`,
-    Array.isArray(r.displayTagOrigins) && r.displayTagOrigins.length
-      ? `<dt>태그 출처</dt><dd>${r.displayTagOrigins.map(tag => `${esc(tag.value)} (${esc(tag.origin)})`).join(' · ')}</dd>` : '',
-    privacyDecisionRow, renderProvenance(r.provenance)
-  ].join('') : '';
-  const controls = renderEnrichmentControls(r, enrichmentLoadState, ENRICH);
-  const details = detailRows + enrichmentRows + (controls ? `<dd class="free">${controls}</dd>` : '');
-  const related = (r.relatedItems || []).map(item => item.href
-    ? `<li><a href="${esc(item.href)}">${esc(item.label)}</a></li>`
-    : `<li><span>${esc(item.label)}</span></li>`).join('');
-  const statusClass = r.enrichmentStatus === 'failed' ? 'error'
-    : (r.enrichmentStatus === 'retry_wait' || r.enrichmentStatus === 'privacy_review_required' ? 'warn'
-      : (r.enrichmentStatus === 'completed' ? 'ok' : ''));
-  return `<article class="card${r.done ? ' done' : ''}"${safeRecordId ? ` id="record-${esc(r.record_id)}"` : ''}>
+  const details = detailRows;
+  const issue = visibleEnrichmentIssue(r);
+  return `<article class="card${r.done ? ' done' : ''}"${safeRecordId ? ` id="record-${viewKey}-${esc(r.record_id)}" data-record-id="${esc(r.record_id)}"` : ''}>
     <div class="meta"><span class="t" style="background:${COLOR[r.type]||'var(--dim)'}">${esc(r.type)}</span>
     <span class="d">${d}${r.saved ? `<em>저장 ${esc(r.saved)}</em>` : ''}</span>
-    ${r.enrichmentStatus ? `<span class="enrich-status ${statusClass}">${esc(statusLabel(r.enrichmentStatus))}</span>` : ''}
+    ${issue ? `<span class="enrich-status ${issue.status === 'failed' ? 'error' : 'warn'}">${esc(issue.message)}</span>` : ''}
     </div>
-    <p${details ? ` class="card-body" role="button" tabindex="0" aria-expanded="false" aria-controls="${esc(detailsId)}"` : ''}>${esc(r.body||'')}</p>
+    <p class="card-body" role="button" tabindex="0" aria-expanded="false"${details ? ` aria-controls="${esc(detailsId)}"` : ''}>${esc(r.body||'')}</p>
     ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(host(r.url))}</a>` : ''}
-    ${(r.displayTags||[]).length ? `<div class="tg">#${r.displayTags.map(esc).join(' #')}</div>` : ''}
-    ${related ? `<ul class="rel">${related}</ul>` : ''}
+    ${renderEnrichmentIssue(r)}
     ${details ? `<dl class="dt" id="${esc(detailsId)}" hidden>${details}</dl>` : ''}
+    ${renderRecordMetadata(r)}
+    ${renderEnrichmentEditor(r, enrichmentLoadState, ENRICH, viewKey)}
   </article>`;
 }
 function setEnrichmentUploadState(cardElement, uploading){
@@ -1418,7 +1469,7 @@ function setEnrichmentUploadState(cardElement, uploading){
   });
 }
 async function submitCardEnrichment(cardElement, trigger){
-  const recordId = cardElement.id.replace(/^record-/, '');
+  const recordId = cardElement.dataset.recordId;
   const record = ALL.find(item => item && item.record_id === recordId);
   const action = trigger.dataset.enrichAction;
   const state = enrichmentControlState(record, enrichmentLoadState);
@@ -1435,9 +1486,13 @@ async function submitCardEnrichment(cardElement, trigger){
     kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId
   };
   if(action === 'add_connection'){
-    const selected = cardElement.querySelector('[data-enrich-connection]').value;
-    const [kind, targetId] = selected.split(':', 2);
-    input.connection = { kind, target_id:targetId };
+    if(trigger.dataset.enrichKind && trigger.dataset.enrichTargetId){
+      input.connection = { kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId };
+    }else{
+      const selectedControl = cardElement.querySelector('[data-enrich-connection]');
+      const [kind, targetId] = (selectedControl ? selectedControl.value : '').split(':', 2);
+      input.connection = { kind, target_id:targetId };
+    }
   }
   setEnrichmentUploadState(cardElement, true);
   try{
@@ -1452,36 +1507,99 @@ async function submitCardEnrichment(cardElement, trigger){
 /* 본문을 탭하면 잘린 글이 펼쳐지고, 상세가 있으면 함께 열린다 */
 function bind(el){
   el.querySelectorAll('.card').forEach(c => {
-    const p = c.querySelector('p'); if(!p) return;
+    const p = c.querySelector('p');
     const dl = c.querySelector('.dt');
-    if(!dl) return;
-    const setDetails = open => {
-      const next = toggleCardDetails(open);
-      p.classList.toggle('open', next.open);
-      p.setAttribute('aria-expanded', next.expanded);
-      dl.hidden = next.hidden;
-    };
-    p.onclick = () => setDetails(p.getAttribute('aria-expanded') === 'true');
-    p.onkeydown = event => {
-      if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); p.click(); }
-    };
+    if(p){
+      const setDetails = open => {
+        const next = toggleCardDetails(open);
+        p.classList.toggle('open', next.open);
+        p.setAttribute('aria-expanded', next.expanded);
+        if(dl) dl.hidden = next.hidden;
+      };
+      p.onclick = () => setDetails(p.getAttribute('aria-expanded') === 'true');
+      p.onkeydown = event => {
+        if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); p.click(); }
+      };
+    }
     c.querySelectorAll('[data-enrich-action]').forEach(button => {
       button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); };
     });
+    const edit = c.querySelector('[data-enrich-edit]');
+    if(edit){ edit.onclick = () => {
+      const panel = c.querySelector('[data-enrich-editor-panel]');
+      if(!panel) return;
+      const open = panel.hidden;
+      panel.hidden = !open; edit.setAttribute('aria-expanded', String(open));
+      if(open){
+        const record = ALL.find(item => item && item.record_id === c.dataset.recordId);
+        const recommendations = panel.querySelector('[data-enrich-recommendations]');
+        if(record && recommendations && !recommendations.dataset.loaded){
+          recommendations.innerHTML = renderConnectionRecommendations(record, ENRICH);
+          recommendations.dataset.loaded = 'true';
+          recommendations.querySelectorAll('[data-enrich-action]').forEach(button => { button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); }; });
+        }
+      }
+    }; }
+    c.querySelectorAll('[data-focus-record]').forEach(button => {
+      button.onclick = () => focusConnectedRecord(button.dataset.focusRecord);
+    });
+    const search = c.querySelector('[data-enrich-connection-search]');
+    if(search) search.oninput = () => {
+      const results = c.querySelector('[data-enrich-search-results]');
+      const record = ALL.find(item => item && item.record_id === c.dataset.recordId);
+      const query = search.value.trim().toLowerCase();
+      if(!results || !record || !query) { if(results) results.innerHTML = ''; return; }
+      const used = new Set((record.connections || []).map(item => `${item.kind}:${item.target_id}`));
+      const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects || {};
+      const candidates = [
+        ...ALL.map(item => ({ kind:'record', target_id:item.record_id, label:item.body || '', text:`${item.body || ''} ${(item.displayTags || []).join(' ')}` })),
+        ...Object.entries(projects).map(([target_id, item]) => ({ kind:'project', target_id, label:item.title || target_id, text:item.title || '' })),
+      ].filter(item => item.target_id && !(item.kind === 'record' && item.target_id === record.record_id)
+        && !used.has(`${item.kind}:${item.target_id}`) && item.text.toLowerCase().includes(query)).slice(0,20);
+      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)} <small>${item.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('');
+      results.querySelectorAll('[data-enrich-action]').forEach(button => { button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); }; });
+    };
   });
+}
+function focusConnectedRecord(recordId){
+  const target = ALL.find(record => record && record.record_id === recordId);
+  if(!target){ toast('연결된 기록을 찾을 수 없음'); return; }
+  forcedConnectedRecordId = recordId;
+  highlightedRecordId = recordId;
+  if(subType) renderSub(); else renderList();
+  const activeList = subType ? $('sub-list') : $('list');
+  const cardElement = activeList && activeList.querySelector(`[data-record-id="${recordId}"]`);
+  if(cardElement){ cardElement.classList.add('focused'); cardElement.scrollIntoView({ behavior:'smooth', block:'center' }); }
+}
+function applyConnectedFocus(){
+  if(!highlightedRecordId) return;
+  const activeList = subType ? $('sub-list') : $('list');
+  const focused = activeList && activeList.querySelector(`[data-record-id="${highlightedRecordId}"]`);
+  highlightedRecordId = '';
+  if(!focused) return;
+  focused.classList.add('focused');
+  setTimeout(() => focused.classList.remove('focused'), 2400);
+}
+function appendForcedConnectedRecord(list, recordId, records){
+  if(!recordId || list.some(record => record && record.record_id === recordId)) return list;
+  const forced = (Array.isArray(records) ? records : []).find(record => record && record.record_id === recordId);
+  return forced ? [forced, ...list] : list;
 }
 function renderList(){
   renderChips();
   const q = st.q.toLowerCase();
-  const list = ALL.filter(r => {
+  let list = ALL.filter(r => {
     if(st.tag && r.type!==st.tag) return false;
     if(st.undone && r.done) return false;
     if(q && !(recordSearchText(r)+(r.detail||[]).join(' ')).toLowerCase().includes(q)) return false;
     return true;
   }).slice(0,80);
-  $('list').innerHTML = list.map(card).join('');
+  list = appendForcedConnectedRecord(list, forcedConnectedRecordId, ALL);
+  forcedConnectedRecordId = '';
+  $('list').innerHTML = list.map(record => card(record, 'main')).join('');
   $('empty').hidden = list.length>0;
   bind($('list'));
+  applyConnectedFocus();
 }
 /* 얼마나 쓰고 있는지는 꺼내보는 일과 성격이 달라 맨 아래에 둡니다.
    위에 두면 매번 눈에 들어오는데, 정작 눌러서 할 일이 없는 숫자입니다. */

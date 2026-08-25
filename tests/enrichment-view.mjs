@@ -302,6 +302,9 @@ const viewContracts = new Function('esc', `
   const STATUS_LABEL = ${JSON.stringify(STATUS_LABEL)};
   const STATUS_REASON_LABEL = ${JSON.stringify(STATUS_REASON_LABEL)};
   ${namedFunction('statusLabel')}
+  ${namedFunction('recordDate')}
+  ${namedFunction('enrichmentRejectionLabel')}
+  ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('statusReasonLabel')}
   ${namedFunction('enrichmentWarning')}
   ${namedFunction('resolveConnection')}
@@ -646,6 +649,129 @@ const tagLimitControls = controlContracts.renderEnrichmentControls({
   ...editableRecord, displayTags:['하나','둘','셋'],
 }, 'loaded', { targets:{ records:{}, projects:{} } });
 assert.match(tagLimitControls, /data-enrich-add-tag[^>]*disabled/, 'adding tags is disabled after three projected tags');
+
+const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASON_LABEL', 'enrichmentLoadState', 'ENRICH', 'ls', 'LS', `
+  ${namedFunction('statusLabel')}
+  ${namedFunction('recordDate')}
+  ${namedFunction('enrichmentRejectionLabel')}
+  ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('enrichmentControlState')}
+  ${namedFunction('visibleEnrichmentIssue')}
+  ${namedFunction('renderEnrichmentIssue')}
+  ${namedFunction('recordTokenSet')}
+  ${namedFunction('rankConnectionCandidates')}
+  ${namedFunction('connectionCandidates')}
+  ${namedFunction('renderRecordMetadata')}
+  ${namedFunction('renderEnrichmentControls')}
+  ${namedFunction('renderEnrichmentEditor')}
+  ${namedFunction('card')}
+  return { visibleEnrichmentIssue, renderEnrichmentIssue, rankConnectionCandidates, renderRecordMetadata, renderEnrichmentEditor, card };
+`)(value => String(value).replace(/[&<>\"']/g, char => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;',
+}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er' });
+
+for(const status of ['completed', 'pending', 'skipped']){
+  const rendered = cardContracts.card({ ...editableRecord, type:'memo', body:'정상 본문', date:'2026-08-24',
+    enrichmentStatus:status, enrichmentReason:status, detail:['제목: 원래 필드'], relatedItems:[] });
+  assert.doesNotMatch(rendered, /분석 상태|태그 출처|분석 이력|사유/, `${status} cards hide enrichment diagnostics`);
+  assert.match(rendered, /data-enrich-edit/, `${status} cards always expose an explicit edit button`);
+}
+const detailLessCard = cardContracts.card({ ...editableRecord, type:'memo', body:'상세 없는 긴 본문', date:'2026-08-24', detail:[], relatedItems:[] });
+assert.match(detailLessCard, /<p class="card-body" role="button" tabindex="0" aria-expanded="false">/,
+  'a detail-less card body still has an accessible tap and keyboard expansion affordance');
+assert.deepEqual(cardContracts.visibleEnrichmentIssue({ enrichmentStatus:'completed' }), null,
+  'completed status is not a card-level issue');
+assert.deepEqual(cardContracts.visibleEnrichmentIssue({ enrichmentStatus:'retry_wait' }), {
+  status:'retry_wait', message:'자동 분석 재시도 중',
+}, 'retry state has only a concise user action message');
+assert.match(cardContracts.renderEnrichmentIssue({ ...privacyRecord, type:'memo' }, 'loaded', {}), /개인정보 확인 필요/,
+  'privacy review renders a concise issue rather than raw diagnostic fields');
+for(const sidecarState of ['unavailable', 'incompatible']){
+  const editor = cardContracts.renderEnrichmentEditor(editableRecord, sidecarState, { targets:{ records:{}, projects:{} } });
+  assert.match(editor, /data-enrich-edit[^>]*disabled[^>]*분석 상태를 확인한 뒤 수정 가능/,
+    `${sidecarState} sidecars disable editing with an accessible reason`);
+}
+const pendingEditor = cardContracts.renderEnrichmentEditor({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', { targets:{ records:{}, projects:{} } });
+assert.match(pendingEditor, /data-enrich-edit[^>]*disabled[^>]*분석 완료 전에는 수정할 수 없음/,
+  'pending enrichment disables editing with its specific accessible reason');
+for(const status of ['retry_wait', 'failed', 'skipped']){
+  const editor = cardContracts.renderEnrichmentEditor({ ...editableRecord, enrichmentStatus:status }, 'loaded', { targets:{ records:{}, projects:{} } });
+  assert.match(editor, /data-enrich-edit(?![^>]*disabled)/, `${status} keeps its edit button enabled when scope is valid`);
+  assert.match(editor, /enrich-editor-main-rec-a[\s\S]*enrich-controls/, `${status} provides a usable tag and connection edit panel`);
+}
+const mainCardMarkup = cardContracts.card({ ...editableRecord, type:'memo', body:'동일 기록', date:'2026-08-24', detail:['제목: 원래 필드'], relatedItems:[] }, 'main');
+const subCardMarkup = cardContracts.card({ ...editableRecord, type:'memo', body:'동일 기록', date:'2026-08-24', detail:['제목: 원래 필드'], relatedItems:[] }, 'sub');
+assert.match(mainCardMarkup, /id="record-main-rec-a"[\s\S]*aria-controls="details-main-rec-a"[\s\S]*id="details-main-rec-a"[\s\S]*aria-controls="enrich-editor-main-rec-a"/,
+  'main cards use view-scoped record, detail, and editor IDs');
+assert.match(subCardMarkup, /id="record-sub-rec-a"[\s\S]*aria-controls="details-sub-rec-a"[\s\S]*id="details-sub-rec-a"[\s\S]*aria-controls="enrich-editor-sub-rec-a"/,
+  'subview cards use distinct view-scoped IDs and aria controls');
+assert.doesNotMatch(subCardMarkup, /record-main-rec-a|details-main-rec-a|enrich-editor-main-rec-a/,
+  'coexisting main and subview cards do not duplicate DOM IDs');
+const ids = markup => [...markup.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+const mainIds = new Set(ids(mainCardMarkup)), subIds = new Set(ids(subCardMarkup));
+assert.deepEqual([...mainIds].filter(id => subIds.has(id)), [],
+  'all main and subview card IDs, including inputs, are disjoint');
+assert.match(mainCardMarkup, /for="enrich-tag-main-rec-a"[\s\S]*id="enrich-tag-main-rec-a"[\s\S]*id="enrich-connection-search-main-rec-a"/,
+  'main editor labels target namespaced inputs');
+assert.match(subCardMarkup, /for="enrich-tag-sub-rec-a"[\s\S]*id="enrich-tag-sub-rec-a"[\s\S]*id="enrich-connection-search-sub-rec-a"/,
+  'subview editor labels target namespaced inputs');
+const bindSource = namedFunction('bind');
+assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
+  'namespaced cards never derive a logical record ID from their DOM ID');
+assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
+  'edit opening and connection search resolve records from data-record-id');
+const privacyEditor = cardContracts.renderEnrichmentEditor(privacyRecord, 'loaded', { targets:{ records:{}, projects:{} } });
+assert.match(privacyEditor, /allow_redacted[\s\S]*allow_original[\s\S]*skip_enrichment/,
+  'privacy review keeps all three privacy actions behind its explicit edit control');
+
+const ranked = cardContracts.rankConnectionCandidates({ ...editableRecord, body:'ＡＩ 모바일 자동화', date:'2026-08-20' }, [
+  { record_id:'rec-z', body:'ai 자동화', displayTags:['모바일'], date:'2026-08-21' },
+  { record_id:'rec-b', body:'AI 자동화', displayTags:['모바일'], date:'2026-08-22' },
+  { record_id:'rec-a', body:'self', displayTags:[], date:'2026-08-23' },
+], { targets:{ records:{}, projects:{ 'project-a':{ title:'AI 자동화' } } } });
+assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_id}`), ['record:rec-b', 'record:rec-z', 'project:project-a'],
+  'recommendations use NFKC common-token score, newest date, and target ID ordering');
+assert.match(cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
+  { label:'관련 기록', href:'#record-rec-b' },
+  { label:'생활 OS', href:'' },
+], connections:[
+  { kind:'record', target_id:'rec-b' }, { kind:'project', target_id:'project-a' },
+] }), /분류·관계 메타데이터[\s\S]*태그[\s\S]*연결[\s\S]*data-focus-record/,
+  'metadata has labeled tags and neutral connected-record chips separate from external URLs');
+
+const focusState = { q:'현재 검색', tag:'memo', undone:true };
+const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };
+const focusContracts = new Function('ALL', 'toast', 'renderList', 'renderSub', '$', `
+  let forcedConnectedRecordId = '', highlightedRecordId = '', subType = '';
+  ${namedFunction('focusConnectedRecord')}
+  ${namedFunction('appendForcedConnectedRecord')}
+  return { focusConnectedRecord, appendForcedConnectedRecord, setSubType:value => { subType=value; }, state:() => ({ forcedConnectedRecordId, highlightedRecordId, subType }) };
+`)([
+  { record_id:'rec-in-filter', type:'memo' }, { record_id:'rec-outside', type:'idea' },
+], message => { focusContractsMessage = message; }, () => { focusContractsRendered += 1; }, () => { focusContractsSubRendered += 1; }, id => ({ querySelector:selector => id === 'sub-list' && selector === '[data-record-id="rec-outside"]' ? visibleSubCard : null }));
+let focusContractsMessage = '', focusContractsRendered = 0, focusContractsSubRendered = 0;
+focusContracts.focusConnectedRecord('rec-outside');
+assert.deepEqual(focusState, { q:'현재 검색', tag:'memo', undone:true },
+  'focusing a connection does not mutate the current filter state');
+assert.equal(focusContractsRendered, 1, 'focusing a connected record renders exactly once');
+assert.deepEqual(focusContracts.appendForcedConnectedRecord([{ record_id:'rec-in-filter' }], focusContracts.state().forcedConnectedRecordId, [
+  { record_id:'rec-in-filter' }, { record_id:'rec-outside' },
+]).map(record => record.record_id), ['rec-outside', 'rec-in-filter'],
+  'renderList prepends a linked target outside the active filter or 80-item window once');
+assert.equal(focusContracts.state().highlightedRecordId, 'rec-outside', 'the forced target is marked for highlight');
+focusContracts.setSubType('읽을거리');
+focusContracts.focusConnectedRecord('rec-outside');
+assert.equal(focusContractsSubRendered, 1, 'an active subview rerenders itself for connected-record focus');
+assert.deepEqual(focusContracts.appendForcedConnectedRecord([], focusContracts.state().forcedConnectedRecordId, [
+  { record_id:'rec-outside' },
+]).map(record => record.record_id), ['rec-outside'], 'a subview may one-shot include a target outside its subtype');
+focusContracts.focusConnectedRecord('rec-missing');
+assert.equal(focusContractsMessage, '연결된 기록을 찾을 수 없음', 'a missing connection reports without rendering or changing state');
+assert.match(html, /compact-list button\{min-width:44px;min-height:44px/, 'compact delete controls meet the 44px touch target');
+assert.match(source, /const panel = c\.querySelector\('\[data-enrich-editor-panel\]'\)/,
+  'an edit button resolves its panel within its own card when main and subview cards coexist');
+assert.match(source, /activeList && activeList\.querySelector\(`\[data-record-id="\$\{recordId\}"\]`\)/,
+  'connected-record focus resolves only within the active visible list');
 
 /* Pre-cutover E2E fixture. This intentionally joins the actual loader, composition,
    correction queue, and receipt reconciliation functions rather than re-stating their
