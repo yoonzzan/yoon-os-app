@@ -773,16 +773,22 @@ function validateEnrichments(value){
       let privacyDecision = null;
       if(item.privacy_decision !== undefined){
         const decision = item.privacy_decision;
-        if(!isObject(decision) || !['action','source_hash','redaction_version'].every(key => key in decision)
-           || !Object.keys(decision).every(key => ['action','source_hash','redaction_version'].includes(key))
+        const hasSourceScope = isObject(decision) && Object.prototype.hasOwnProperty.call(decision, 'source_hash');
+        const hasContentScope = isObject(decision) && Object.prototype.hasOwnProperty.call(decision, 'content_hash');
+        const scopeKey = hasSourceScope ? 'source_hash' : 'content_hash';
+        const scopeHash = decision && decision[scopeKey];
+        const recordScopeHash = hasSourceScope ? item.source_hash : item.content_hash;
+        if(!isObject(decision) || hasSourceScope === hasContentScope
+           || !['action',scopeKey,'redaction_version'].every(key => key in decision)
+           || !Object.keys(decision).every(key => ['action',scopeKey,'redaction_version'].includes(key))
            || !['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
-           || !safeHash(decision.source_hash) || !Number.isInteger(decision.redaction_version)
+           || !safeHash(scopeHash) || scopeHash !== recordScopeHash || !Number.isInteger(decision.redaction_version)
            || decision.redaction_version < 1) throw new Error('invalid privacy decision');
-        privacyDecision = { action:decision.action, source_hash:decision.source_hash,
-          redaction_version:decision.redaction_version };
+        privacyDecision = { action:decision.action, [scopeKey]:scopeHash, redaction_version:decision.redaction_version };
       }
       records[recordId] = {
-        record_id:recordId, source_hash:item.source_hash, status:item.status, status_reason:item.status_reason,
+        record_id:recordId, source_hash:item.source_hash, content_hash:item.content_hash,
+        status:item.status, status_reason:item.status_reason,
         prompt_version:item.prompt_version, redaction_version:item.redaction_version,
         tags, connections, event_receipts:receipts,
         applied_event_ids:[...item.applied_event_ids], provenance, privacy_decision:privacyDecision
@@ -807,12 +813,12 @@ function validateGraphCurrent(value){
     }
     return true;
   };
-  const normalizeGraphTag = text => {
-    if(!safeText(text, 256)) return null;
-    const normalized = text.normalize('NFKC').trim().replace(/^#+\s*/, '').replace(/\s+/g, ' ').toLowerCase();
-    return normalized && normalized.length <= 80 ? normalized : null;
-  };
-  const safeTag = text => normalizeGraphTag(text) === text;
+  /* Python's normalize_tag uses Unicode casefold.  Do not reconstruct a raw display
+     value with JavaScript toLowerCase: e.g. Straße projects to the valid key strasse.
+     The browser only verifies the projector-provided canonical key and its membership. */
+  const safeTagKey = text => safeText(text, 80)
+    && text === text.normalize('NFKC').trim().replace(/^#+\s*/, '').replace(/\s+/g, ' ').toLowerCase();
+  const safeRawTagDisplay = text => safeText(text, 256);
   const safeSourceLocator = value => safeText(value, 1024)
     && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
     && !value.split('/').some(part => !part || part === '.' || part === '..');
@@ -825,7 +831,7 @@ function validateGraphCurrent(value){
        || value.projection_sequence < 0 || !Array.isArray(value.nodes) || !Array.isArray(value.contains)
        || !Object.keys(value).every(key => ['schema_version','projection_sequence','nodes','contains'].includes(key))
        || value.nodes.length > 10000 || value.contains.length > 10000) throw new Error('unsupported schema');
-    const nodes = {}, nodeKinds = {};
+    const nodes = {}, nodeKinds = {}, tagKeysByNode = {};
     for(const node of value.nodes){
       if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','document','tag'].includes(node.kind)
          || typeof node.deleted !== 'boolean' || !isObject(node.metadata) || !Array.isArray(node.tags)
@@ -838,8 +844,9 @@ function validateGraphCurrent(value){
       }
       if(!Object.keys(node).every(key => common.has(key))) throw new Error('invalid node field');
       if(node.kind === 'tag'){
-        if(Object.keys(node.metadata).length !== 2 || !safeTag(node.metadata.normalized_key)
-           || !safeTag(normalizeEnrichmentTag(node.metadata.raw_display_value) || '')) throw new Error('invalid tag node');
+        if(Object.keys(node.metadata).length !== 2 || !safeTagKey(node.metadata.normalized_key)
+           || !safeRawTagDisplay(node.metadata.raw_display_value)) throw new Error('invalid tag node');
+        tagKeysByNode[node.node_id] = node.metadata.normalized_key;
       }else if(Object.keys(node.metadata).length) throw new Error('invalid node metadata');
       nodes[node.node_id] = node; nodeKinds[node.node_id] = node.kind;
     }
@@ -848,9 +855,9 @@ function validateGraphCurrent(value){
       const tags = [], tagKeys = new Set();
       for(const tag of node.tags){
         const base = new Set(['target_id','normalized_key','raw_display_value','origin','source_event_id']);
-        const normalized = normalizeGraphTag(tag && tag.raw_display_value);
         if(!isObject(tag) || !safeId(tag.target_id) || nodeKinds[tag.target_id] !== 'tag'
-           || !safeTag(tag.normalized_key) || !normalized || tag.normalized_key !== normalized
+           || !safeTagKey(tag.normalized_key) || !safeRawTagDisplay(tag.raw_display_value)
+           || tagKeysByNode[tag.target_id] !== tag.normalized_key
            || !['source','auto','user'].includes(tag.origin) || !safeId(tag.source_event_id)
            || tagKeys.has(tag.normalized_key)) throw new Error('invalid tag fact');
         if(tag.origin === 'source'){
@@ -1398,14 +1405,23 @@ function toggleCardDetails(open){
   const next = !open;
   return { open:next, expanded:String(next), hidden:!next };
 }
-/* A decision belongs to the exact content and redaction revision it was made for.
+/* A decision belongs to the exact source-or-content and redaction revision it was made for.
    Keeping the scope in the projected sidecar lets an old permission disappear rather
    than silently applying to a changed record. */
 function privacyDecisionIsCurrent(decision, record){
-  return !!(decision && record && typeof decision === 'object'
-    && ['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
-    && decision.source_hash === record.source_hash
-    && decision.redaction_version === record.redaction_version);
+  if(!decision || !record || typeof decision !== 'object' || typeof record !== 'object'
+     || !['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
+     || !Number.isInteger(decision.redaction_version) || decision.redaction_version < 1
+     || decision.redaction_version !== record.redaction_version) return false;
+  const hasSourceScope = Object.prototype.hasOwnProperty.call(decision, 'source_hash');
+  const hasContentScope = Object.prototype.hasOwnProperty.call(decision, 'content_hash');
+  if(hasSourceScope === hasContentScope) return false;
+  const scopeKey = hasSourceScope ? 'source_hash' : 'content_hash';
+  const scopeHash = decision[scopeKey];
+  return Object.keys(decision).length === 3
+    && Object.keys(decision).every(key => ['action',scopeKey,'redaction_version'].includes(key))
+    && typeof scopeHash === 'string' && /^sha256-[0-9a-f]{64}$/.test(scopeHash)
+    && scopeHash === record[scopeKey];
 }
 function enrichmentResultForRecord(recordId){
   const results = ls.get(LS.er, {}), result = results && results[recordId];

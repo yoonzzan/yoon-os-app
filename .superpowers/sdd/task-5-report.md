@@ -28,3 +28,8 @@
 - validator의 `source_locator`(1024), link `raw_text`(4096), multiline newline/tab 및 production 허용 separator, control-character 경계를 canonical Python contract에 맞춰 테스트했다.
 - `tests/projector-sidecar.fixture.json`을 production `projector_app_fixture.py` 출력으로 갱신했다. 기본 Node 테스트는 graph fixture가 없으면 실패하며, `LIFE_OS_ROOT` 사용 시 checked-in fixture와 production 출력의 동일성도 확인한다.
 - graph cache·ETag·timestamp key를 owner/repository/branch namespace로 분리하고 config switch가 이전 graph cache를 읽지 않는 회귀 테스트를 추가했다.
+
+## 최종 품질 보완
+
+- `privacy_decision`은 production의 exact one-of scope인 `{source_hash}` 또는 `{content_hash}`만 허용하고, 해당 sidecar record의 같은 hash와 일치할 때만 수용한다. source/content/stale/malformed 및 UI current-scope 회귀를 추가했다.
+- graph tag는 Python `casefold` 결과를 raw display에서 JavaScript `toLowerCase()`로 재생성해 비교하지 않는다. projector가 낸 canonical key의 안전성, metadata 정확한 shape, raw display control/length, tag-node key membership만 검증한다. `Straße` → `strasse`와 malformed/mismatched metadata 회귀를 추가했다.

@@ -99,6 +99,36 @@ const sidecar = { schema_version: 1, records: {
 } };
 
 assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
+const sourceScopedPrivacy = structuredClone(sidecar);
+sourceScopedPrivacy.records['rec-a'].privacy_decision = {
+  action:'allow_redacted', source_hash:HASH_A, redaction_version:1,
+};
+assert.equal(validateEnrichments(sourceScopedPrivacy).ok, true,
+  'a source-scoped privacy decision matching the projected source hash must validate');
+const contentScopedPrivacy = structuredClone(sidecar);
+contentScopedPrivacy.records['rec-a'].content_hash = HASH_B;
+contentScopedPrivacy.records['rec-a'].privacy_decision = {
+  action:'allow_original', content_hash:HASH_B, redaction_version:1,
+};
+assert.equal(validateEnrichments(contentScopedPrivacy).ok, true,
+  'a content-scoped privacy decision matching the projected content hash must validate');
+const staleSourceScopedPrivacy = structuredClone(sourceScopedPrivacy);
+staleSourceScopedPrivacy.records['rec-a'].privacy_decision.source_hash = HASH_B;
+assert.equal(validateEnrichments(staleSourceScopedPrivacy).ok, false,
+  'a source-scoped privacy decision must expire when its projected source hash changes');
+const staleContentScopedPrivacy = structuredClone(contentScopedPrivacy);
+staleContentScopedPrivacy.records['rec-a'].privacy_decision.content_hash = HASH_A;
+assert.equal(validateEnrichments(staleContentScopedPrivacy).ok, false,
+  'a content-scoped privacy decision must expire when its projected content hash changes');
+for(const malformedPrivacyDecision of [
+  { action:'allow_original', redaction_version:1 },
+  { action:'allow_original', source_hash:HASH_A, content_hash:HASH_B, redaction_version:1 },
+]){
+  const malformedPrivacy = structuredClone(contentScopedPrivacy);
+  malformedPrivacy.records['rec-a'].privacy_decision = malformedPrivacyDecision;
+  assert.equal(validateEnrichments(malformedPrivacy).ok, false,
+    'a privacy decision must contain exactly one canonical scope hash');
+}
 const canonicalProjection = projectCurrentFixture();
 const canonicalEnrichment = canonicalProjection.enrichment_current || canonicalProjection;
 assert.ok(canonicalProjection.graph_current,
@@ -130,6 +160,27 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   const graphFacts = composeGraphFacts(graphCurrent);
   assert.equal(validateGraphCurrent(graphCurrent).ok, true,
     'the actual Python graph projector output must satisfy the browser graph contract');
+  const casefoldGraph = structuredClone(graphCurrent);
+  const casefoldTag = casefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  casefoldTag.normalized_key = 'strasse';
+  casefoldTag.raw_display_value = 'Straße';
+  const casefoldTagNode = casefoldGraph.nodes.find(node => node.node_id === casefoldTag.target_id);
+  casefoldTagNode.metadata = { normalized_key:'strasse', raw_display_value:'Straße' };
+  assert.equal(validateGraphCurrent(casefoldGraph).ok, true,
+    'a valid Python-casefolded tag key must not be rejected by JavaScript lowercasing');
+  assert.deepEqual(composeGraphFacts(casefoldGraph).records[scenarioRecord('source_only').record_id].tags,
+    [{ value:'Straße', origin:'source' }],
+    'a casefolded graph tag retains its projector-provided raw display value');
+  const malformedTagMetadata = structuredClone(casefoldGraph);
+  malformedTagMetadata.nodes.find(node => node.node_id === casefoldTag.target_id)
+    .metadata.raw_display_value = 'bad\u0000metadata';
+  assert.equal(validateGraphCurrent(malformedTagMetadata).ok, false,
+    'malformed tag metadata remains rejected even when raw-to-key recomputation is not used');
+  const mismatchedTagMembership = structuredClone(casefoldGraph);
+  mismatchedTagMembership.nodes.find(node => node.node_id === casefoldTag.target_id)
+    .metadata.normalized_key = 'different-tag';
+  assert.equal(validateGraphCurrent(mismatchedTagMembership).ok, false,
+    'a tag fact must belong to a tag node with the same canonical projector key');
   assert.deepEqual(graphFacts.records[canonicalProjection.scenarios.source_only.record_id].tags.map(tag => tag.value), ['source only'],
     'graph source facts are projected without copying fixture JSON into JavaScript');
   const boundaryGraph = structuredClone(graphCurrent);
@@ -752,7 +803,7 @@ const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
 }[char])), controlStore, STATUS_REASON_LABEL);
 
 const editableRecord = {
-  record_id:'rec-a', source_hash:HASH_A, redaction_version:3, enrichmentStatus:'completed',
+  record_id:'rec-a', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3, enrichmentStatus:'completed',
   displayTags:['하나'], connections:[],
 };
 assert.deepEqual(controlContracts.enrichmentControlState(editableRecord, 'loaded'), {
@@ -797,11 +848,20 @@ assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_A, redaction_version:3,
 }, editableRecord), true, 'a privacy choice is current only for its exact source and redaction scope');
 assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', content_hash:HASH_B, redaction_version:3,
+}, editableRecord), true, 'a privacy choice is current for its exact content and redaction scope');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_B, redaction_version:3,
 }, editableRecord), false, 'a privacy choice expires when the source changes');
 assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', content_hash:HASH_A, redaction_version:3,
+}, editableRecord), false, 'a privacy choice expires when the content changes');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_A, redaction_version:2,
 }, editableRecord), false, 'a privacy choice expires when redaction changes');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3,
+}, editableRecord), false, 'a malformed dual-scoped privacy decision is never current');
 
 assert.deepEqual(controlContracts.connectionCandidates(editableRecord, {
   targets:{ records:{ 'rec-a':{ title:'현재 기록' }, 'rec-b':{ title:'후보 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
