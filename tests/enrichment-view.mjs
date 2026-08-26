@@ -171,6 +171,21 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   assert.deepEqual(composeGraphFacts(casefoldGraph).records[scenarioRecord('source_only').record_id].tags,
     [{ value:'Straße', origin:'source' }],
     'a casefolded graph tag retains its projector-provided raw display value');
+  const cherokeeCasefoldGraph = structuredClone(graphCurrent);
+  const cherokeeTag = cherokeeCasefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  cherokeeTag.normalized_key = 'Ꭰ';
+  cherokeeTag.raw_display_value = 'ꭰ';
+  cherokeeCasefoldGraph.nodes.find(node => node.node_id === cherokeeTag.target_id)
+    .metadata = { normalized_key:'Ꭰ', raw_display_value:'ꭰ' };
+  assert.equal(validateGraphCurrent(cherokeeCasefoldGraph).ok, true,
+    'a valid Python-casefolded Cherokee key must not be reinterpreted with JavaScript lowercasing');
+  const malformedCanonicalKey = structuredClone(cherokeeCasefoldGraph);
+  const malformedCherokeeTag = malformedCanonicalKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  malformedCherokeeTag.normalized_key = ' leading-space';
+  malformedCanonicalKey.nodes.find(node => node.node_id === malformedCherokeeTag.target_id)
+    .metadata.normalized_key = ' leading-space';
+  assert.equal(validateGraphCurrent(malformedCanonicalKey).ok, false,
+    'a normalized tag key with non-canonical whitespace remains rejected without casefold recreation');
   const malformedTagMetadata = structuredClone(casefoldGraph);
   malformedTagMetadata.nodes.find(node => node.node_id === casefoldTag.target_id)
     .metadata.raw_display_value = 'bad\u0000metadata';

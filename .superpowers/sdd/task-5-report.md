@@ -33,3 +33,4 @@
 
 - `privacy_decision`은 production의 exact one-of scope인 `{source_hash}` 또는 `{content_hash}`만 허용하고, 해당 sidecar record의 같은 hash와 일치할 때만 수용한다. source/content/stale/malformed 및 UI current-scope 회귀를 추가했다.
 - graph tag는 Python `casefold` 결과를 raw display에서 JavaScript `toLowerCase()`로 재생성해 비교하지 않는다. projector가 낸 canonical key의 안전성, metadata 정확한 shape, raw display control/length, tag-node key membership만 검증한다. `Straße` → `strasse`와 malformed/mismatched metadata 회귀를 추가했다.
+- canonical key 자체에도 JavaScript case 변환을 적용하지 않는다. 대신 type/length/control, NFKC stability, trim·공백·선행 `#` canonical form, non-empty 및 duplicate/node-membership 불변식을 검증한다. production `normalize_tag_value('ꭰ') == 'Ꭰ'` Cherokee casefold 회귀와 malformed whitespace key 거부를 추가했다.

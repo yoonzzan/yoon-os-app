@@ -813,11 +813,12 @@ function validateGraphCurrent(value){
     }
     return true;
   };
-  /* Python's normalize_tag uses Unicode casefold.  Do not reconstruct a raw display
-     value with JavaScript toLowerCase: e.g. Straße projects to the valid key strasse.
-     The browser only verifies the projector-provided canonical key and its membership. */
+  /* Python's normalize_tag uses Unicode casefold.  The browser must not reinterpret
+     that key with JavaScript case conversion: Cherokee ꭰ projects to Ꭰ.  It only
+     checks stable transport syntax and the projector-provided node membership. */
   const safeTagKey = text => safeText(text, 80)
-    && text === text.normalize('NFKC').trim().replace(/^#+\s*/, '').replace(/\s+/g, ' ').toLowerCase();
+    && text === text.normalize('NFKC') && text === text.trim() && !text.startsWith('#')
+    && text === text.replace(/\s+/gu, ' ');
   const safeRawTagDisplay = text => safeText(text, 256);
   const safeSourceLocator = value => safeText(value, 1024)
     && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
