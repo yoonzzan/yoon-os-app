@@ -246,6 +246,14 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   sourceTag.source_locator += 'a';
   assert.equal(validateGraphCurrent(boundaryGraph).ok, false,
     'source_locator values above the canonical 1024-character boundary are rejected');
+  const astralSourceLocatorGraph = structuredClone(graphCurrent);
+  const astralSourceTag = astralSourceLocatorGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  astralSourceTag.source_locator = '😀'.repeat(1024);
+  assert.equal(validateGraphCurrent(astralSourceLocatorGraph).ok, true,
+    'a 1024-code-point astral source locator is accepted despite 2048 UTF-16 units');
+  astralSourceTag.source_locator += '😀';
+  assert.equal(validateGraphCurrent(astralSourceLocatorGraph).ok, false,
+    'a 1025-code-point astral source locator remains above the canonical boundary');
   const multilineGraph = structuredClone(graphCurrent);
   const typedLink = multilineGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0];
   const multilinePrefix = '첫 줄\n\t둘째 줄 ';
@@ -255,6 +263,14 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   typedLink.raw_text += 'x';
   assert.equal(validateGraphCurrent(multilineGraph).ok, false,
     'link raw_text above the canonical 4096-character boundary is rejected');
+  const astralRawTextGraph = structuredClone(graphCurrent);
+  const astralTypedLink = astralRawTextGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0];
+  astralTypedLink.raw_text = '😀'.repeat(4000);
+  assert.equal(validateGraphCurrent(astralRawTextGraph).ok, true,
+    'a 4000-code-point astral link raw_text is accepted despite 8000 UTF-16 units');
+  astralTypedLink.raw_text += '😀'.repeat(97);
+  assert.equal(validateGraphCurrent(astralRawTextGraph).ok, false,
+    'a 4097-code-point astral link raw_text remains above the canonical boundary');
   const lineSeparatorGraph = structuredClone(graphCurrent);
   lineSeparatorGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0].raw_text = '첫 줄\u2028둘째 줄';
   assert.equal(validateGraphCurrent(lineSeparatorGraph).ok, true,

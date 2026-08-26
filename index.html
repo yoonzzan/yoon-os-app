@@ -805,8 +805,9 @@ function validateGraphCurrent(value){
   const safeId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id);
   const safeHash = hash => typeof hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(hash);
   const safeText = (text, limit, multiline = false) => {
-    if(typeof text !== 'string' || !text || text.length > limit) return false;
-    for(const character of text){
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    if(!codePoints.length || codePoints.length > limit) return false;
+    for(const character of codePoints){
       if((multiline && ['\t','\r','\n'].includes(character))) continue;
       if(/\p{Cc}|\p{Cs}/u.test(character)
          || (!multiline && /\p{Zl}|\p{Zp}/u.test(character))) return false;
