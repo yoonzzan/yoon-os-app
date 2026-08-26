@@ -196,6 +196,22 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
     .metadata = { normalized_key:astralKey, raw_display_value:astralKey };
   assert.equal(validateGraphCurrent(astralBoundaryGraph).ok, true,
     '80 astral Unicode code points are accepted even though they occupy 160 UTF-16 units');
+  const longRawDisplay = '#'.repeat(100) + '😀'.repeat(80);
+  const longRawDisplayGraph = structuredClone(graphCurrent);
+  const longRawDisplayTag = longRawDisplayGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  longRawDisplayTag.normalized_key = '😀'.repeat(80);
+  longRawDisplayTag.raw_display_value = longRawDisplay;
+  longRawDisplayGraph.nodes.find(node => node.node_id === longRawDisplayTag.target_id)
+    .metadata = { normalized_key:'😀'.repeat(80), raw_display_value:longRawDisplay };
+  assert.equal(validateGraphCurrent(longRawDisplayGraph).ok, true,
+    'a production-valid 180-code-point raw display is accepted despite 260 UTF-16 units');
+  const overlongRawDisplay = structuredClone(longRawDisplayGraph);
+  const overlongRawDisplayTag = overlongRawDisplay.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  overlongRawDisplayTag.raw_display_value = '#'.repeat(177) + '😀'.repeat(80);
+  overlongRawDisplay.nodes.find(node => node.node_id === overlongRawDisplayTag.target_id)
+    .metadata.raw_display_value = '#'.repeat(177) + '😀'.repeat(80);
+  assert.equal(validateGraphCurrent(overlongRawDisplay).ok, false,
+    '257 Unicode code points remain above the canonical raw-display limit');
   const overlongAstralKey = structuredClone(astralBoundaryGraph);
   const overlongAstralTag = overlongAstralKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
   overlongAstralTag.normalized_key = '😀'.repeat(81);

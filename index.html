@@ -820,7 +820,11 @@ function validateGraphCurrent(value){
     return codePoints.length > 0 && codePoints.length <= 80
       && !codePoints.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
   };
-  const safeRawTagDisplay = text => safeText(text, 256);
+  const safeRawTagDisplay = text => {
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    return codePoints.length > 0 && codePoints.length <= 256
+      && !codePoints.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
   const safeSourceLocator = value => safeText(value, 1024)
     && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
     && !value.split('/').some(part => !part || part === '.' || part === '..');
