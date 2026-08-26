@@ -20,3 +20,11 @@
 - `git diff --check`: pass
 - `node --test tests/*.mjs`: pass (`fail 0`)
 - fixture command: pass
+
+## 리뷰 보완
+
+- `prepData()`의 실제 runtime compose 호출이 `GRAPH`를 전달하도록 고쳤고, source records + enrichment current + graph current를 거치는 known-empty 통합 회귀 테스트를 추가했다.
+- tombstone record node도 알려진 graph node로 간주해 빈 facts가 legacy tags/links를 막는다.
+- validator의 `source_locator`(1024), link `raw_text`(4096), multiline newline/tab 및 production 허용 separator, control-character 경계를 canonical Python contract에 맞춰 테스트했다.
+- `tests/projector-sidecar.fixture.json`을 production `projector_app_fixture.py` 출력으로 갱신했다. 기본 Node 테스트는 graph fixture가 없으면 실패하며, `LIFE_OS_ROOT` 사용 시 checked-in fixture와 production 출력의 동일성도 확인한다.
+- graph cache·ETag·timestamp key를 owner/repository/branch namespace로 분리하고 config switch가 이전 graph cache를 읽지 않는 회귀 테스트를 추가했다.

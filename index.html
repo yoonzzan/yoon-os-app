@@ -325,7 +325,6 @@
 const LS = {
   cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data', p:'yz-proj',
   e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at',
-  g:'yz-graph-current', ge:'yz-graph-current-etag', ga:'yz-graph-current-at',
   eq:'yz-enrich-queue', ex:'yz-enrich-quarantine', ep:'yz-enrich-pending',
   er:'yz-enrich-results'
 };
@@ -799,23 +798,28 @@ function validateGraphCurrent(value){
   const empty = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
   const safeId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id);
   const safeHash = hash => typeof hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(hash);
-  const safeText = text => typeof text === 'string' && text.length > 0 && text.length <= 512
-    && !/[\u0000-\u001f\u007f]/.test(text);
-  const safeTag = text => typeof text === 'string' && normalizeEnrichmentTag(text) === text;
-  const safeReason = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value);
-  const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
-  const sourceFields = new Set(['source_locator','source_order','raw_text','reason','confidence']);
-  const factExtrasAreSafe = (fact, allowed) => {
-    for(const [key, item] of Object.entries(fact)){
-      if(allowed.has(key)) continue;
-      if(!sourceFields.has(key)) return false;
-      if(key === 'source_order' && (!Number.isInteger(item) || item < 0 || item > 1000000)) return false;
-      if(key === 'confidence' && (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 1)) return false;
-      if((key === 'source_locator' || key === 'raw_text') && !safeText(item)) return false;
-      if(key === 'reason' && !safeReason(item)) return false;
+  const safeText = (text, limit, multiline = false) => {
+    if(typeof text !== 'string' || !text || text.length > limit) return false;
+    for(const character of text){
+      if((multiline && ['\t','\r','\n'].includes(character))) continue;
+      if(/\p{Cc}|\p{Cs}/u.test(character)
+         || (!multiline && /\p{Zl}|\p{Zp}/u.test(character))) return false;
     }
     return true;
   };
+  const normalizeGraphTag = text => {
+    if(!safeText(text, 256)) return null;
+    const normalized = text.normalize('NFKC').trim().replace(/^#+\s*/, '').replace(/\s+/g, ' ').toLowerCase();
+    return normalized && normalized.length <= 80 ? normalized : null;
+  };
+  const safeTag = text => normalizeGraphTag(text) === text;
+  const safeSourceLocator = value => safeText(value, 1024)
+    && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
+    && !value.split('/').some(part => !part || part === '.' || part === '..');
+  const safeSourceOrder = value => Number.isInteger(value) && value >= 0 && value <= 1000000;
+  const safeConfidence = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+  const safeRelation = value => ['related','related_project','previous_note','source_reference'].includes(value);
+  const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
   try{
     if(!isObject(value) || value.schema_version !== 1 || !Number.isInteger(value.projection_sequence)
        || value.projection_sequence < 0 || !Array.isArray(value.nodes) || !Array.isArray(value.contains)
@@ -823,7 +827,7 @@ function validateGraphCurrent(value){
        || value.nodes.length > 10000 || value.contains.length > 10000) throw new Error('unsupported schema');
     const nodes = {}, nodeKinds = {};
     for(const node of value.nodes){
-      if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','tag'].includes(node.kind)
+      if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','document','tag'].includes(node.kind)
          || typeof node.deleted !== 'boolean' || !isObject(node.metadata) || !Array.isArray(node.tags)
          || !Array.isArray(node.links) || !Array.isArray(node.continuations) || !Array.isArray(node.legacy_annotations)
          || node.node_id in nodes || node.tags.length > 1000 || node.links.length > 1000) throw new Error('invalid node');
@@ -843,27 +847,63 @@ function validateGraphCurrent(value){
     for(const node of Object.values(nodes)){
       const tags = [], tagKeys = new Set();
       for(const tag of node.tags){
-        const allowed = new Set(['target_id','normalized_key','raw_display_value','origin','source_event_id']);
+        const base = new Set(['target_id','normalized_key','raw_display_value','origin','source_event_id']);
+        const normalized = normalizeGraphTag(tag && tag.raw_display_value);
         if(!isObject(tag) || !safeId(tag.target_id) || nodeKinds[tag.target_id] !== 'tag'
-           || !safeTag(tag.normalized_key) || !safeTag(normalizeEnrichmentTag(tag.raw_display_value) || '')
-           || tag.normalized_key !== normalizeEnrichmentTag(tag.raw_display_value)
+           || !safeTag(tag.normalized_key) || !normalized || tag.normalized_key !== normalized
            || !['source','auto','user'].includes(tag.origin) || !safeId(tag.source_event_id)
-           || tagKeys.has(tag.normalized_key) || !factExtrasAreSafe(tag, allowed)) throw new Error('invalid tag fact');
+           || tagKeys.has(tag.normalized_key)) throw new Error('invalid tag fact');
+        if(tag.origin === 'source'){
+          base.add('source_locator'); base.add('source_order');
+          if(!safeSourceLocator(tag.source_locator) || !safeSourceOrder(tag.source_order)) throw new Error('invalid tag source');
+        }else if(tag.origin === 'auto'){
+          base.add('confidence'); base.add('reason');
+          if(!safeConfidence(tag.confidence) || !safeText(tag.reason, 4096)) throw new Error('invalid tag auto');
+        }
+        if(!Object.keys(tag).every(key => base.has(key))) throw new Error('invalid tag field');
         tagKeys.add(tag.normalized_key);
         tags.push({ value:tag.raw_display_value, origin:tag.origin });
       }
       const links = [], linkKeys = new Set();
       for(const link of node.links){
-        const allowed = new Set(['target_id','relation','origin','source_event_id']);
-        if(!isObject(link) || !safeId(link.target_id) || !['record','project','daily_note'].includes(nodeKinds[link.target_id])
-           || !safeReason(link.relation) || !['source','auto','user'].includes(link.origin) || !safeId(link.source_event_id)
-           || linkKeys.has(`${link.target_id}:${link.relation}`) || !factExtrasAreSafe(link, allowed)) throw new Error('invalid link fact');
+        const base = new Set(['target_id','relation','origin','source_event_id']);
+        if(!isObject(link) || !safeId(link.target_id) || !['record','project','daily_note','document'].includes(nodeKinds[link.target_id])
+           || !safeRelation(link.relation) || !['source','auto','user'].includes(link.origin) || !safeId(link.source_event_id)
+           || linkKeys.has(`${link.target_id}:${link.relation}`)) throw new Error('invalid link fact');
+        if(link.origin === 'source'){
+          base.add('source_locator'); base.add('source_order'); base.add('reason'); base.add('raw_text');
+          if(!safeSourceLocator(link.source_locator) || !safeSourceOrder(link.source_order)
+             || (link.reason !== undefined && !safeText(link.reason, 4096))
+             || (link.raw_text !== undefined && !safeText(link.raw_text, 4096, true))) throw new Error('invalid link source');
+        }else if(link.origin === 'auto'){
+          base.add('confidence'); base.add('reason');
+          if(!safeConfidence(link.confidence) || !safeText(link.reason, 4096)) throw new Error('invalid link auto');
+        }else{
+          base.add('reason');
+          if(link.reason !== undefined && !safeText(link.reason, 4096)) throw new Error('invalid link user');
+        }
+        if(!Object.keys(link).every(key => base.has(key))) throw new Error('invalid link field');
         linkKeys.add(`${link.target_id}:${link.relation}`);
         links.push({ kind:nodeKinds[link.target_id], target_id:link.target_id, origin:link.origin, relation:link.relation });
       }
-      const annotationSafe = item => isObject(item) && Object.values(item).every(value =>
-        typeof value === 'boolean' || Number.isFinite(value) || (typeof value === 'string' && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value)));
-      if(!node.continuations.every(annotationSafe) || !node.legacy_annotations.every(annotationSafe)) throw new Error('invalid annotation');
+      const annotationSafe = (item, kind) => {
+        if(!isObject(item) || item.kind !== kind || item.origin !== 'source' || !safeId(item.source_event_id)
+           || !safeText(item.section_label, 4096) || !safeText(item.raw_text, 4096, true)
+           || !safeSourceLocator(item.source_locator) || !safeSourceOrder(item.source_order)) return false;
+        const allowed = new Set(['kind','section_label','raw_text','source_locator','source_order','origin','source_event_id']);
+        if(kind === 'legacy_annotation'){
+          if(!['resolved','unresolved','needs_review','external_url','continuation','settled_non_edge'].includes(item.resolution_status)) return false;
+          allowed.add('resolution_status');
+          for(const field of ['resolved_target_id','relation','reason_text','continuation_text']) allowed.add(field);
+          if(item.resolved_target_id !== undefined && (!safeId(item.resolved_target_id) || !nodeKinds[item.resolved_target_id])) return false;
+          if(item.relation !== undefined && !safeRelation(item.relation)) return false;
+          if(item.reason_text !== undefined && !safeText(item.reason_text, 4096)) return false;
+          if(item.continuation_text !== undefined && !safeText(item.continuation_text, 4096, true)) return false;
+        }
+        return Object.keys(item).every(key => allowed.has(key));
+      };
+      if(!node.continuations.every(item => annotationSafe(item, 'continuation'))
+         || !node.legacy_annotations.every(item => annotationSafe(item, 'legacy_annotation'))) throw new Error('invalid annotation');
       checkedNodes[node.node_id] = { node_id:node.node_id, kind:node.kind, deleted:node.deleted,
         content_hash:node.content_hash, tags, links };
     }
@@ -885,8 +925,10 @@ function composeGraphFacts(graphCurrent){
   if(!checked.ok) return { ok:false, records:{} };
   const records = {};
   for(const node of checked.value.nodes){
-    if(node.kind === 'record' && !node.deleted) records[node.node_id] = {
-      content_hash:node.content_hash, tags:node.tags, connections:node.links,
+    if(node.kind === 'record') records[node.node_id] = {
+      content_hash:node.content_hash,
+      tags:node.deleted ? [] : node.tags,
+      connections:node.deleted ? [] : node.links,
     };
   }
   return { ok:true, records };
@@ -946,12 +988,24 @@ async function loadEnrichments(){
   return ENRICH;
 }
 
+function graphCacheKeys(config){
+  const value = key => config && typeof config[key] === 'string' ? config[key] : '';
+  const namespace = [value('owner'), value('repo'), value('branch') || 'main']
+    .map(encodeURIComponent).join(':');
+  return {
+    current:`yz-graph-current:${namespace}`,
+    etag:`yz-graph-current-etag:${namespace}`,
+    at:`yz-graph-current-at:${namespace}`,
+  };
+}
+
 async function loadGraphCurrent(){
+  const cache = graphCacheKeys(cfg);
   let j;
   try{
     j = await gh('graph-current.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
   }catch(error){
-    const checked = validateGraphCurrent(ls.get(LS.g, null));
+    const checked = validateGraphCurrent(ls.get(cache.current, null));
     if(checked.ok){ GRAPH = checked.value; graphLoadState = 'cached'; return GRAPH; }
     GRAPH = checked.value; graphLoadState = 'unavailable'; return GRAPH;
   }
@@ -960,7 +1014,7 @@ async function loadGraphCurrent(){
   catch(error){ checked = { ok:false, value:{ schema_version:1, projection_sequence:0, nodes:[], contains:[] } }; }
   if(!checked.ok){ GRAPH = checked.value; graphLoadState = 'incompatible'; return GRAPH; }
   GRAPH = checked.value; graphLoadState = 'loaded';
-  ls.set(LS.g, GRAPH); ls.set(LS.ge, j.sha || j.etag || ''); ls.set(LS.ga, Date.now());
+  ls.set(cache.current, GRAPH); ls.set(cache.etag, j.sha || j.etag || ''); ls.set(cache.at, Date.now());
   return GRAPH;
 }
 
@@ -1477,7 +1531,8 @@ function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main
 function prepData(){
   const sourceRecords = Array.isArray(DATA.records) ? DATA.records : [];
   const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects;
-  ALL = composeRecords(sourceRecords, ENRICH).map((r, order) => {
+  const graphCurrent = typeof GRAPH === 'undefined' ? null : GRAPH;
+  ALL = composeRecords(sourceRecords, ENRICH, graphCurrent).map((r, order) => {
     const _d = recordDate(r);
     return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects),
       _d, _at:recordSavedAt(r, _d), _order:order};
