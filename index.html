@@ -325,6 +325,7 @@
 const LS = {
   cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data', p:'yz-proj',
   e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at',
+  g:'yz-graph-current', ge:'yz-graph-current-etag', ga:'yz-graph-current-at',
   eq:'yz-enrich-queue', ex:'yz-enrich-quarantine', ep:'yz-enrich-pending',
   er:'yz-enrich-results'
 };
@@ -471,7 +472,9 @@ const STATUS_REASON_LABEL = {
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
 let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+let GRAPH = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
 let enrichmentLoadState = 'unavailable';
+let graphLoadState = 'unavailable';
 /* undone = 위 칸("안 읽은 링크"·"가고싶은 곳")으로 걸렀을 때만 켜집니다.
    그 칸의 숫자가 처리 안 한 것만 센 값이라, 목록도 같은 기준이어야 합니다 */
 let st = { type:'memo', q:'', tag:'', undone:false };
@@ -716,8 +719,9 @@ function validateEnrichments(value){
     const records = {};
     for(const [recordId, item] of Object.entries(value.records)){
       if(!safeId(recordId) || !isObject(item)) throw new Error('invalid record state');
-      const allowed = new Set(['record_id','source_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision']);
+      const allowed = new Set(['record_id','source_hash','content_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision']);
       if(!Object.keys(item).every(k => allowed.has(k)) || item.record_id !== recordId || !safeHash(item.source_hash)
+         || (item.content_hash !== undefined && !safeHash(item.content_hash))
          || !statuses.has(item.status) || !safeReason(item.status_reason)
          || !Number.isInteger(item.prompt_version) || item.prompt_version < 1
          || !Number.isInteger(item.redaction_version) || item.redaction_version < 1
@@ -789,22 +793,133 @@ function validateEnrichments(value){
   }catch(error){ return { ok:false, value:empty }; }
 }
 
-function composeRecords(records, enrichments){
-  /* loadEnrichments supplies a strictly validated projection. Keep this join deliberately
-     small and data-only so callers can also compose an already validated v1 snapshot. */
+/* The graph is untrusted browser input. Validate its complete app-readable shape before
+   deriving facts, so a malformed node cannot selectively overwrite a raw record. */
+function validateGraphCurrent(value){
+  const empty = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
+  const safeId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id);
+  const safeHash = hash => typeof hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(hash);
+  const safeText = text => typeof text === 'string' && text.length > 0 && text.length <= 512
+    && !/[\u0000-\u001f\u007f]/.test(text);
+  const safeTag = text => typeof text === 'string' && normalizeEnrichmentTag(text) === text;
+  const safeReason = value => typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value);
+  const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
+  const sourceFields = new Set(['source_locator','source_order','raw_text','reason','confidence']);
+  const factExtrasAreSafe = (fact, allowed) => {
+    for(const [key, item] of Object.entries(fact)){
+      if(allowed.has(key)) continue;
+      if(!sourceFields.has(key)) return false;
+      if(key === 'source_order' && (!Number.isInteger(item) || item < 0 || item > 1000000)) return false;
+      if(key === 'confidence' && (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 1)) return false;
+      if((key === 'source_locator' || key === 'raw_text') && !safeText(item)) return false;
+      if(key === 'reason' && !safeReason(item)) return false;
+    }
+    return true;
+  };
+  try{
+    if(!isObject(value) || value.schema_version !== 1 || !Number.isInteger(value.projection_sequence)
+       || value.projection_sequence < 0 || !Array.isArray(value.nodes) || !Array.isArray(value.contains)
+       || !Object.keys(value).every(key => ['schema_version','projection_sequence','nodes','contains'].includes(key))
+       || value.nodes.length > 10000 || value.contains.length > 10000) throw new Error('unsupported schema');
+    const nodes = {}, nodeKinds = {};
+    for(const node of value.nodes){
+      if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','tag'].includes(node.kind)
+         || typeof node.deleted !== 'boolean' || !isObject(node.metadata) || !Array.isArray(node.tags)
+         || !Array.isArray(node.links) || !Array.isArray(node.continuations) || !Array.isArray(node.legacy_annotations)
+         || node.node_id in nodes || node.tags.length > 1000 || node.links.length > 1000) throw new Error('invalid node');
+      const common = new Set(['node_id','kind','metadata','deleted','tags','links','continuations','legacy_annotations']);
+      if(node.kind === 'record'){
+        common.add('content_hash');
+        if(!safeHash(node.content_hash)) throw new Error('invalid record hash');
+      }
+      if(!Object.keys(node).every(key => common.has(key))) throw new Error('invalid node field');
+      if(node.kind === 'tag'){
+        if(Object.keys(node.metadata).length !== 2 || !safeTag(node.metadata.normalized_key)
+           || !safeTag(normalizeEnrichmentTag(node.metadata.raw_display_value) || '')) throw new Error('invalid tag node');
+      }else if(Object.keys(node.metadata).length) throw new Error('invalid node metadata');
+      nodes[node.node_id] = node; nodeKinds[node.node_id] = node.kind;
+    }
+    const checkedNodes = {};
+    for(const node of Object.values(nodes)){
+      const tags = [], tagKeys = new Set();
+      for(const tag of node.tags){
+        const allowed = new Set(['target_id','normalized_key','raw_display_value','origin','source_event_id']);
+        if(!isObject(tag) || !safeId(tag.target_id) || nodeKinds[tag.target_id] !== 'tag'
+           || !safeTag(tag.normalized_key) || !safeTag(normalizeEnrichmentTag(tag.raw_display_value) || '')
+           || tag.normalized_key !== normalizeEnrichmentTag(tag.raw_display_value)
+           || !['source','auto','user'].includes(tag.origin) || !safeId(tag.source_event_id)
+           || tagKeys.has(tag.normalized_key) || !factExtrasAreSafe(tag, allowed)) throw new Error('invalid tag fact');
+        tagKeys.add(tag.normalized_key);
+        tags.push({ value:tag.raw_display_value, origin:tag.origin });
+      }
+      const links = [], linkKeys = new Set();
+      for(const link of node.links){
+        const allowed = new Set(['target_id','relation','origin','source_event_id']);
+        if(!isObject(link) || !safeId(link.target_id) || !['record','project','daily_note'].includes(nodeKinds[link.target_id])
+           || !safeReason(link.relation) || !['source','auto','user'].includes(link.origin) || !safeId(link.source_event_id)
+           || linkKeys.has(`${link.target_id}:${link.relation}`) || !factExtrasAreSafe(link, allowed)) throw new Error('invalid link fact');
+        linkKeys.add(`${link.target_id}:${link.relation}`);
+        links.push({ kind:nodeKinds[link.target_id], target_id:link.target_id, origin:link.origin, relation:link.relation });
+      }
+      const annotationSafe = item => isObject(item) && Object.values(item).every(value =>
+        typeof value === 'boolean' || Number.isFinite(value) || (typeof value === 'string' && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value)));
+      if(!node.continuations.every(annotationSafe) || !node.legacy_annotations.every(annotationSafe)) throw new Error('invalid annotation');
+      checkedNodes[node.node_id] = { node_id:node.node_id, kind:node.kind, deleted:node.deleted,
+        content_hash:node.content_hash, tags, links };
+    }
+    const contains = [];
+    const containsKeys = new Set();
+    for(const edge of value.contains){
+      if(!isObject(edge) || Object.keys(edge).length !== 2 || !safeId(edge.source_id) || !safeId(edge.target_id)
+         || nodeKinds[edge.source_id] !== 'daily_note' || nodeKinds[edge.target_id] !== 'record'
+         || containsKeys.has(`${edge.source_id}:${edge.target_id}`)) throw new Error('invalid contains edge');
+      containsKeys.add(`${edge.source_id}:${edge.target_id}`); contains.push({ source_id:edge.source_id, target_id:edge.target_id });
+    }
+    return { ok:true, value:{ schema_version:1, projection_sequence:value.projection_sequence,
+      nodes:Object.values(checkedNodes), contains } };
+  }catch(error){ return { ok:false, value:empty }; }
+}
+
+function composeGraphFacts(graphCurrent){
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { ok:false, records:{} };
+  const records = {};
+  for(const node of checked.value.nodes){
+    if(node.kind === 'record' && !node.deleted) records[node.node_id] = {
+      content_hash:node.content_hash, tags:node.tags, connections:node.links,
+    };
+  }
+  return { ok:true, records };
+}
+
+function composeRecords(records, enrichments, graphCurrent){
+  /* Enrichment provides status/privacy only. Graph facts are primary once the exact
+     record and content scope are known; raw/enrichment facts remain a migration fallback. */
   const projected = enrichments && enrichments.schema_version === 1
     && enrichments.records && typeof enrichments.records === 'object' && !Array.isArray(enrichments.records)
     ? enrichments.records : {};
+  const graph = graphCurrent && typeof composeGraphFacts === 'function' ? composeGraphFacts(graphCurrent) : { ok:false, records:{} };
   return (Array.isArray(records) ? records : []).map(record => {
     const rawTags = Array.isArray(record.tags) ? record.tags : [];
     const state = projected[record.record_id];
-    if(!state || state.source_hash !== record.source_hash || !Array.isArray(state.tags)
-       || state.tags.some(tag => !tag || typeof tag.value !== 'string')) return { ...record, displayTags:rawTags };
-    return { ...record, displayTags:state.tags.map(tag => tag.value), displayTagOrigins:state.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
-      connections:Array.isArray(state.connections) ? state.connections : [],
+    const status = state && state.source_hash === record.source_hash ? {
       enrichmentStatus:state.status, enrichmentReason:state.status_reason,
       redaction_version:state.redaction_version, appliedEventIds:state.applied_event_ids,
-      eventReceipts:state.event_receipts, provenance:state.provenance, privacyDecision:state.privacy_decision };
+      eventReceipts:state.event_receipts, provenance:state.provenance, privacyDecision:state.privacy_decision,
+    } : {};
+    const legacyFacts = state && state.source_hash === record.source_hash && Array.isArray(state.tags)
+      && !state.tags.some(tag => !tag || typeof tag.value !== 'string') ? {
+        displayTags:state.tags.map(tag => tag.value),
+        displayTagOrigins:state.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
+        connections:Array.isArray(state.connections) ? state.connections : [],
+      } : { displayTags:rawTags, connections:Array.isArray(record.connections) ? record.connections : [] };
+    const graphFacts = graph.ok && graph.records[record.record_id];
+    const facts = graphFacts && graphFacts.content_hash === record.content_hash ? {
+      displayTags:graphFacts.tags.map(tag => tag.value),
+      displayTagOrigins:graphFacts.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
+      connections:graphFacts.connections,
+    } : legacyFacts;
+    return { ...record, ...facts, ...status };
   });
 }
 
@@ -831,9 +946,28 @@ async function loadEnrichments(){
   return ENRICH;
 }
 
+async function loadGraphCurrent(){
+  let j;
+  try{
+    j = await gh('graph-current.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
+  }catch(error){
+    const checked = validateGraphCurrent(ls.get(LS.g, null));
+    if(checked.ok){ GRAPH = checked.value; graphLoadState = 'cached'; return GRAPH; }
+    GRAPH = checked.value; graphLoadState = 'unavailable'; return GRAPH;
+  }
+  let checked;
+  try{ checked = validateGraphCurrent(JSON.parse(b64decode(j.content))); }
+  catch(error){ checked = { ok:false, value:{ schema_version:1, projection_sequence:0, nodes:[], contains:[] } }; }
+  if(!checked.ok){ GRAPH = checked.value; graphLoadState = 'incompatible'; return GRAPH; }
+  GRAPH = checked.value; graphLoadState = 'loaded';
+  ls.set(LS.g, GRAPH); ls.set(LS.ge, j.sha || j.etag || ''); ls.set(LS.ga, Date.now());
+  return GRAPH;
+}
+
 async function loadData(){
   const [recordsResult] = await Promise.allSettled([
-    gh('records.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' }), loadEnrichments()
+    gh('records.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' }), loadEnrichments(),
+    typeof loadGraphCurrent === 'function' ? loadGraphCurrent() : Promise.resolve(null)
   ]);
   if(recordsResult.status !== 'fulfilled') throw recordsResult.reason;
   const d = JSON.parse(b64decode(recordsResult.value.content));
@@ -1156,6 +1290,11 @@ function statusReasonLabel(reason){
 function enrichmentWarning(state){
   if(state === 'cached') return '자동 분석 상태가 최신이 아닐 수 있음';
   if(state === 'unavailable' || state === 'incompatible') return '자동 분석 상태를 불러오지 못함';
+  return '';
+}
+function graphWarning(state){
+  if(state === 'cached') return '태그·연결 정보가 최신이 아닐 수 있음';
+  if(state === 'unavailable' || state === 'incompatible') return '태그·연결 정보를 불러오지 못해 이전 정보로 표시 중';
   return '';
 }
 function visibleEnrichmentIssue(record){
@@ -1639,7 +1778,7 @@ function renderStatus(){
 function renderView(){
   prepData(); renderPlan(); renderQuestions(); renderTimeuse();
   renderStats(); renderList(); renderSub(); renderStatus();
-  const warning = enrichmentWarning(enrichmentLoadState);
+  const warning = [enrichmentWarning(enrichmentLoadState), graphWarning(graphLoadState)].filter(Boolean).join(' · ');
   $('enrichment-notice').hidden = !warning;
   $('enrichment-notice').textContent = warning;
   $('built').textContent = DATA.built ? `${ALL.length}건 · ${DATA.built} 기준` : '';

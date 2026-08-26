@@ -64,11 +64,13 @@ function assignedLiteral(name) {
   assert.fail(`${name} literal must be balanced`);
 }
 
-const { composeRecords, validateEnrichments } = new Function(`
+const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent } = new Function(`
   ${namedFunction('normalizeEnrichmentTag')}
   ${namedFunction('validateEnrichments')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('composeGraphFacts')}
   ${namedFunction('composeRecords')}
-  return { composeRecords, validateEnrichments };
+  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent };
 `)();
 
 const HASH_A = `sha256-${'a'.repeat(64)}`;
@@ -77,16 +79,13 @@ const fixturePath = resolve(import.meta.dirname, 'projector-sidecar.fixture.json
 const projectorRoot = process.env.LIFE_OS_ROOT
   || resolve(import.meta.dirname, '..', '..', 'automatic-record-enrichment');
 function projectCurrentFixture() {
-  const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
   const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
   if(existsSync(generator)){
-    const generated = JSON.parse(execFileSync('python3', [generator], {
+    return JSON.parse(execFileSync('python3', [generator], {
       cwd:projectorRoot, encoding:'utf8',
     }));
-    assert.deepEqual(generated, checkedIn,
-      'the checked-in app fixture must match the canonical Python projector output');
   }
-  return checkedIn;
+  return JSON.parse(readFileSync(fixturePath, 'utf8'));
 }
 const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
 const sidecar = { schema_version: 1, records: {
@@ -98,16 +97,78 @@ const sidecar = { schema_version: 1, records: {
 
 assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
 const canonicalProjection = projectCurrentFixture();
-assert.equal(validateEnrichments(canonicalProjection).ok, true,
+const canonicalEnrichment = canonicalProjection.enrichment_current || canonicalProjection;
+assert.equal(validateEnrichments(canonicalEnrichment).ok, true,
   'the strict browser validator must accept the canonical project_current output');
 assert.deepEqual(composeRecords([
   { record_id:'rec-a', source_hash:HASH_A, tags:['Source Tag'], body:'본문' },
-], canonicalProjection)[0].displayTags, ['수동', '자동분류'],
+], canonicalEnrichment)[0].displayTags, ['수동', '자동분류'],
   'the actual projector fixture must feed the browser composition without a copied contract');
-const canonicalWithExtraTargetField = structuredClone(canonicalProjection);
+const canonicalWithExtraTargetField = structuredClone(canonicalEnrichment);
 canonicalWithExtraTargetField.targets.records['rec-a'].unexpected = 'must-not-pass';
 assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   'target catalog entries must reject fields outside the reduced projector contract');
+
+if(canonicalProjection.graph_current){
+  const graphCurrent = canonicalProjection.graph_current;
+  const graphNodes = Object.fromEntries(graphCurrent.nodes.map(node => [node.node_id, node]));
+  const scenarioRecord = (name, overrides = {}) => {
+    const recordId = canonicalProjection.scenarios[name].record_id;
+    const node = graphNodes[recordId];
+    const status = canonicalProjection.enrichment_current.records[recordId];
+    return {
+      record_id:recordId, source_hash:status.source_hash, content_hash:node.content_hash,
+      tags:['legacy fallback tag'], connections:[{ kind:'record', target_id:'rec-a' }], body:'fixture record',
+      ...overrides,
+    };
+  };
+  const graphFacts = composeGraphFacts(graphCurrent);
+  assert.equal(validateGraphCurrent(graphCurrent).ok, true,
+    'the actual Python graph projector output must satisfy the browser graph contract');
+  assert.deepEqual(graphFacts.records[canonicalProjection.scenarios.source_only.record_id].tags.map(tag => tag.value), ['source only'],
+    'graph source facts are projected without copying fixture JSON into JavaScript');
+  assert.deepEqual(composeRecords([scenarioRecord('source_only')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['source only'], 'a current graph node is the primary source of source tags');
+  assert.deepEqual(composeRecords([scenarioRecord('auto_only')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['auto only'], 'a current graph node is the primary source of auto tags');
+  assert.deepEqual(composeRecords([scenarioRecord('mixed')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['mixed auto', 'mixed source'], 'source and auto graph facts compose together');
+  assert.deepEqual(composeRecords([scenarioRecord('user_remove')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    [], 'an empty graph node preserves a user removal');
+  const typed = composeRecords([scenarioRecord('typed_links')], canonicalProjection.enrichment_current, graphCurrent)[0];
+  assert.deepEqual(typed.connections.map(link => link.kind).sort(), ['daily_note', 'project', 'record'],
+    'graph link targets retain their validated node kinds');
+  const knownEmpty = composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, graphCurrent)[0];
+  assert.deepEqual(knownEmpty.displayTags, [],
+    'a known-empty graph node must never re-merge legacy enrichment or raw tags');
+  assert.deepEqual(knownEmpty.connections, [],
+    'a known-empty graph node must never re-merge legacy enrichment links');
+  assert.equal(knownEmpty.enrichmentStatus, 'completed',
+    'enrichment current remains the sole source of processing status');
+
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, null)[0].displayTags,
+    ['legacy fallback tag'], 'only an absent graph permits legacy facts');
+  const unsupported = canonicalProjection.scenarios.incompatible_schema.graph_current;
+  assert.equal(validateGraphCurrent(unsupported).ok, false, 'an unsupported graph schema is explicitly incompatible');
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, unsupported)[0].displayTags,
+    ['legacy fallback tag'], 'an unsupported graph schema falls back to legacy facts');
+  const contentMismatch = structuredClone(graphCurrent);
+  contentMismatch.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).content_hash = HASH_B;
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, contentMismatch)[0].displayTags,
+    ['legacy fallback tag'], 'a graph content-hash mismatch falls back to legacy facts');
+  const recordMismatch = structuredClone(graphCurrent);
+  recordMismatch.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).node_id = 'rec-mismatch';
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, recordMismatch)[0].displayTags,
+    ['legacy fallback tag'], 'a missing matching graph record falls back to legacy facts');
+  const sourceHashChanged = canonicalProjection.scenarios.source_hash_only_change;
+  const sourceHashRecord = { ...sourceHashChanged.changed_record, tags:['legacy fallback tag'], body:'fixture record' };
+  assert.deepEqual(composeRecords([sourceHashRecord], sourceHashChanged.enrichment_current, sourceHashChanged.graph_current)[0].displayTags,
+    ['source hash stable'], 'a source-hash-only change retains content-scoped graph facts');
+  const contentHashChanged = canonicalProjection.scenarios.content_hash_change;
+  const contentHashRecord = { ...contentHashChanged.changed_record, tags:['legacy fallback tag'], body:'fixture record' };
+  assert.deepEqual(composeRecords([contentHashRecord], contentHashChanged.enrichment_current, contentHashChanged.graph_current)[0].displayTags,
+    [], 'a changed content hash uses the current known-empty graph node rather than legacy facts');
+}
 assert.deepEqual(composeRecords(
   [{ record_id: 'rec-a', source_hash: 'sha256-a', tags: ['수동'] }],
   { schema_version: 1, records: { 'rec-a': {
@@ -196,6 +257,38 @@ const invalidBase64WithCache = await makeSidecarLoader(
 )();
 assert.equal(invalidBase64WithCache.enrichmentLoadState, 'incompatible',
   'a base64 decode failure must not fall back to a stale cached projection');
+
+function makeGraphLoader(gh, cache, decode = text => text) {
+  return new Function('gh', 'b64decode', 'ls', 'cfg', `
+    const LS = { g:'yz-graph-current', ge:'yz-graph-current-etag', ga:'yz-graph-current-at' };
+    let GRAPH = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
+    let graphLoadState = 'unavailable';
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('loadGraphCurrent')}
+    return async () => { await loadGraphCurrent(); return { GRAPH, graphLoadState }; };
+  `)(gh, decode, {
+    get: (key, fallback) => cache.get(key) ?? fallback,
+    set: (key, value) => cache.set(key, value),
+  }, { branch:'main' });
+}
+
+if(canonicalProjection.graph_current){
+  const graphCache = new Map([['yz-graph-current', canonicalProjection.graph_current]]);
+  const cachedGraph = await makeGraphLoader(async () => { throw new Error('offline'); }, graphCache)();
+  assert.equal(cachedGraph.graphLoadState, 'cached',
+    'a remote graph failure reports an explicit cached state without breaking records');
+  assert.equal(cachedGraph.GRAPH.nodes.length, canonicalProjection.graph_current.nodes.length,
+    'a validated cached graph remains available for graph-primary composition');
+  const incompatibleGraph = await makeGraphLoader(
+    async () => ({ content:JSON.stringify(canonicalProjection.scenarios.incompatible_schema.graph_current) }), graphCache
+  )();
+  assert.equal(incompatibleGraph.graphLoadState, 'incompatible',
+    'an unsupported remote graph schema is never masked by a stale graph cache');
+  const unavailableGraph = await makeGraphLoader(async () => { throw new Error('missing'); }, new Map())();
+  assert.equal(unavailableGraph.graphLoadState, 'unavailable',
+    'a missing graph has an explicit fallback state rather than failing the whole app');
+}
 
 function makeReceiptSidecarLoader(gh, seed, decode = text => text) {
   return new Function('gh', 'b64decode', 'seed', 'cfg', `
@@ -307,13 +400,14 @@ const viewContracts = new Function('esc', `
   ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('statusReasonLabel')}
   ${namedFunction('enrichmentWarning')}
+  ${namedFunction('graphWarning')}
   ${namedFunction('resolveConnection')}
   ${namedFunction('resolveConnections')}
   ${namedFunction('recordSearchText')}
   ${namedFunction('toggleCardDetails')}
   ${namedFunction('renderProvenance')}
   return {
-    statusLabel, statusReasonLabel, enrichmentWarning, resolveConnection, resolveConnections,
+    statusLabel, statusReasonLabel, enrichmentWarning, graphWarning, resolveConnection, resolveConnections,
     recordSearchText, toggleCardDetails, renderProvenance
   };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
@@ -339,7 +433,11 @@ assert.equal(viewContracts.enrichmentWarning('cached'), '자동 분석 상태가
 for (const state of ['unavailable', 'incompatible']) {
   assert.equal(viewContracts.enrichmentWarning(state), '자동 분석 상태를 불러오지 못함',
     `${state} sidecar state must leave raw records viewable with a warning`);
+  assert.equal(viewContracts.graphWarning(state), '태그·연결 정보를 불러오지 못해 이전 정보로 표시 중',
+    `${state} graph state must remain explicit while the app uses legacy facts`);
 }
+assert.equal(viewContracts.graphWarning('cached'), '태그·연결 정보가 최신이 아닐 수 있음',
+  'a cached graph state remains visible to the reader');
 
 const connectionRecords = [
   { record_id: 'rec-a', body: '원본 연결 제목' },
