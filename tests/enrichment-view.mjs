@@ -749,6 +749,12 @@ assert.match(cardContracts.renderRecordMetadata({ ...editableRecord, relatedItem
   'metadata has labeled tags and neutral connected-record chips separate from external URLs');
 assert.match(html, /metadata-connections \.metadata-values\{[^}]*flex-wrap:nowrap[^}]*overflow:hidden/,
   'connection metadata is constrained to a single visible line');
+assert.match(html, /html\{-webkit-text-size-adjust:100%;text-size-adjust:100%\}/,
+  'mobile text autosizing is fixed without disabling full-page pinch zoom');
+assert.match(html, /\.card\{[^}]*width:100%;min-width:0;max-width:100%\}/,
+  'record cards keep a fixed width inside responsive grid tracks');
+assert.match(html, /\.card p\{[^}]*overflow-wrap:anywhere;word-break:break-word;/,
+  'long record text wraps instead of expanding the card width');
 
 const focusState = { q:'현재 검색', tag:'memo', undone:true };
 const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };

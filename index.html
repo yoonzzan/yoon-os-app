@@ -11,6 +11,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23b9542a'/%3E%3Ctext x='90' y='124' font-size='96' text-anchor='middle' fill='%23fff' font-family='sans-serif'%3E%E2%9C%8E%3C/text%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23b9542a'/%3E%3Ctext x='90' y='124' font-size='96' text-anchor='middle' fill='%23fff' font-family='sans-serif'%3E%E2%9C%8E%3C/text%3E%3C/svg%3E">
 <style>
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
   :root{
     --bg:#faf9f7; --card:#fff; --ink:#1c1b19; --dim:#7a756e; --line:#e6e2dc;
     --accent:#b9542a; --ok:#3f7d58;
@@ -124,17 +125,17 @@
     color:var(--dim);font-size:12.5px;cursor:pointer}
   .chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 
-  .list{display:grid;gap:9px}
+  .list{display:grid;gap:9px;min-width:0}
   @media(min-width:560px){ .list{grid-template-columns:1fr 1fr} }
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
-  .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;width:100%;min-width:0;max-width:100%}
+  .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;min-width:0}
   .card .t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:99px;color:#fff}
-  .card .d{font-size:11px;color:var(--dim)}
+  .card .d{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--dim)}
   .card .d em{font-style:normal;opacity:.65;margin-left:6px}
   .stat.tap{cursor:pointer}
   .stat.tap.on{border-color:var(--accent);background:var(--accent)}
   .stat.tap.on .n,.stat.tap.on .l{color:#fff}
-  .card p{margin:0;font-size:13.5px;white-space:pre-wrap;
+  .card p{margin:0;min-width:0;max-width:100%;font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;
     display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
   .card p.open{-webkit-line-clamp:unset}
   /* 끝낸 것 — 할일·읽을거리·장소가 done 을 씁니다 */
