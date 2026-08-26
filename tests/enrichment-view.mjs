@@ -179,13 +179,37 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
     .metadata = { normalized_key:'Ꭰ', raw_display_value:'ꭰ' };
   assert.equal(validateGraphCurrent(cherokeeCasefoldGraph).ok, true,
     'a valid Python-casefolded Cherokee key must not be reinterpreted with JavaScript lowercasing');
-  const malformedCanonicalKey = structuredClone(cherokeeCasefoldGraph);
-  const malformedCherokeeTag = malformedCanonicalKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
-  malformedCherokeeTag.normalized_key = ' leading-space';
-  malformedCanonicalKey.nodes.find(node => node.node_id === malformedCherokeeTag.target_id)
-    .metadata.normalized_key = ' leading-space';
-  assert.equal(validateGraphCurrent(malformedCanonicalKey).ok, false,
-    'a normalized tag key with non-canonical whitespace remains rejected without casefold recreation');
+  const greekCasefoldGraph = structuredClone(graphCurrent);
+  const greekTag = greekCasefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  greekTag.normalized_key = 'ΐ';
+  greekTag.raw_display_value = 'ΐ';
+  greekCasefoldGraph.nodes.find(node => node.node_id === greekTag.target_id)
+    .metadata = { normalized_key:'ΐ', raw_display_value:'ΐ' };
+  assert.equal(validateGraphCurrent(greekCasefoldGraph).ok, true,
+    'a valid post-casefold decomposed Greek key must not be NFKC-normalized by the browser');
+  const astralKey = '😀'.repeat(80);
+  const astralBoundaryGraph = structuredClone(graphCurrent);
+  const astralTag = astralBoundaryGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  astralTag.normalized_key = astralKey;
+  astralTag.raw_display_value = astralKey;
+  astralBoundaryGraph.nodes.find(node => node.node_id === astralTag.target_id)
+    .metadata = { normalized_key:astralKey, raw_display_value:astralKey };
+  assert.equal(validateGraphCurrent(astralBoundaryGraph).ok, true,
+    '80 astral Unicode code points are accepted even though they occupy 160 UTF-16 units');
+  const overlongAstralKey = structuredClone(astralBoundaryGraph);
+  const overlongAstralTag = overlongAstralKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  overlongAstralTag.normalized_key = '😀'.repeat(81);
+  overlongAstralKey.nodes.find(node => node.node_id === overlongAstralTag.target_id)
+    .metadata.normalized_key = '😀'.repeat(81);
+  assert.equal(validateGraphCurrent(overlongAstralKey).ok, false,
+    '81 Unicode code points remain above the canonical tag-key limit');
+  const controlCharacterKey = structuredClone(greekCasefoldGraph);
+  const controlCharacterTag = controlCharacterKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  controlCharacterTag.normalized_key = 'bad\u0000key';
+  controlCharacterKey.nodes.find(node => node.node_id === controlCharacterTag.target_id)
+    .metadata.normalized_key = 'bad\u0000key';
+  assert.equal(validateGraphCurrent(controlCharacterKey).ok, false,
+    'a control character in the producer key remains rejected');
   const malformedTagMetadata = structuredClone(casefoldGraph);
   malformedTagMetadata.nodes.find(node => node.node_id === casefoldTag.target_id)
     .metadata.raw_display_value = 'bad\u0000metadata';

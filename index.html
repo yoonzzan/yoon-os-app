@@ -813,12 +813,13 @@ function validateGraphCurrent(value){
     }
     return true;
   };
-  /* Python's normalize_tag uses Unicode casefold.  The browser must not reinterpret
-     that key with JavaScript case conversion: Cherokee ꭰ projects to Ꭰ.  It only
-     checks stable transport syntax and the projector-provided node membership. */
-  const safeTagKey = text => safeText(text, 80)
-    && text === text.normalize('NFKC') && text === text.trim() && !text.startsWith('#')
-    && text === text.replace(/\s+/gu, ' ');
+  /* Python owns tag normalization (including Unicode casefold and post-casefold
+     decomposition).  The browser validates only transport safety and membership. */
+  const safeTagKey = text => {
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    return codePoints.length > 0 && codePoints.length <= 80
+      && !codePoints.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
   const safeRawTagDisplay = text => safeText(text, 256);
   const safeSourceLocator = value => safeText(value, 1024)
     && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
