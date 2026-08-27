@@ -297,12 +297,34 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
     'a known-empty graph node must never re-merge legacy enrichment links');
   assert.equal(knownEmpty.enrichmentStatus, 'completed',
     'enrichment current remains the sole source of processing status');
+  const primaryMatrix = [
+    ['source_only', scenarioRecord('source_only'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['auto_only', scenarioRecord('auto_only'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['mixed', scenarioRecord('mixed'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['user_remove', scenarioRecord('user_remove'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['typed_links', scenarioRecord('typed_links'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['known_empty', scenarioRecord('known_empty'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['source_hash_only_change', {
+      ...canonicalProjection.scenarios.source_hash_only_change.changed_record, body:'fixture record',
+    }, canonicalProjection.scenarios.source_hash_only_change.enrichment_current,
+    canonicalProjection.scenarios.source_hash_only_change.graph_current, 'completed'],
+    ['content_hash_change', {
+      ...canonicalProjection.scenarios.content_hash_change.changed_record, body:'fixture record',
+    }, canonicalProjection.scenarios.content_hash_change.enrichment_current,
+    canonicalProjection.scenarios.content_hash_change.graph_current, 'pending'],
+  ];
+  assert.deepEqual(primaryMatrix.map(([name, record, enrichment, graph, status]) => {
+    const composed = composeRecords([record], enrichment, graph)[0];
+    return [name, composed.record_id === record.record_id, composed.graphCurrent, composed.enrichmentStatus];
+  }), primaryMatrix.map(([name,,,, status]) => [name, true, true, status]),
+  'the app consumes every supported Python fixture scenario through graph-primary composition');
   const runtimeCompose = new Function('DATA', 'ENRICH', 'GRAPH', `
     let ALL = [];
     ${namedFunction('normalizeEnrichmentTag')}
     ${namedFunction('validateGraphCurrent')}
     ${namedFunction('composeGraphFacts')}
     ${namedFunction('composeRecords')}
+    ${namedFunction('graphTargetCatalog')}
     ${namedFunction('recordDate')}
     ${namedFunction('recordSavedAt')}
     ${namedFunction('resolveConnection')}
@@ -310,11 +332,20 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
     ${namedFunction('prepData')}
     prepData();
     return structuredClone(ALL);
-  `)({ records:[scenarioRecord('known_empty')] }, canonicalProjection.enrichment_current, graphCurrent);
-  assert.deepEqual(runtimeCompose[0].displayTags, [],
+  `)({ records:[scenarioRecord('known_empty'), scenarioRecord('typed_links'), scenarioRecord('source_only', {
+    body:'연결된 기록 본문',
+  })] }, canonicalProjection.enrichment_current, graphCurrent);
+  const runtimeKnownEmpty = runtimeCompose.find(record => record.record_id === scenarioRecord('known_empty').record_id);
+  const runtimeTyped = runtimeCompose.find(record => record.record_id === scenarioRecord('typed_links').record_id);
+  assert.deepEqual(runtimeKnownEmpty.displayTags, [],
     'prepData must pass GRAPH into runtime composition so known-empty facts stay empty');
-  assert.deepEqual(runtimeCompose[0].connections, [],
+  assert.deepEqual(runtimeKnownEmpty.connections, [],
     'runtime prepData must not re-merge legacy connections for a known-empty graph node');
+  assert.deepEqual(runtimeTyped.relatedItems.map(item => [item.kind, item.label]), [
+    ['daily_note', '[하루 기록] 2026-08-23'],
+    ['project', '[프로젝트] synthetic graph project'],
+    ['record', '[기록] 연결된 기록 본문'],
+  ], 'runtime composition resolves the Python typed-link fixture through safe app labels');
   const tombstoned = structuredClone(graphCurrent);
   tombstoned.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).deleted = true;
   const deletedKnownEmpty = composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, tombstoned)[0];
