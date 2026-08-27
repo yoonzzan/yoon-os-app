@@ -591,13 +591,16 @@ const viewContracts = new Function('esc', `
   ${namedFunction('statusReasonLabel')}
   ${namedFunction('enrichmentWarning')}
   ${namedFunction('graphWarning')}
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('resolveConnection')}
   ${namedFunction('resolveConnections')}
   ${namedFunction('recordSearchText')}
   ${namedFunction('toggleCardDetails')}
   ${namedFunction('renderProvenance')}
   return {
-    statusLabel, statusReasonLabel, enrichmentWarning, graphWarning, resolveConnection, resolveConnections,
+    statusLabel, statusReasonLabel, enrichmentWarning, graphWarning, graphTargetCatalog, resolveConnection, resolveConnections,
     recordSearchText, toggleCardDetails, renderProvenance
   };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
@@ -629,24 +632,35 @@ for (const state of ['unavailable', 'incompatible']) {
 assert.equal(viewContracts.graphWarning('cached'), '태그·연결 정보가 최신이 아닐 수 있음',
   'a cached graph state remains visible to the reader');
 
+const typedScenarioForView = canonicalProjection.scenarios.typed_links;
 const connectionRecords = [
-  { record_id: 'rec-a', body: '원본 연결 제목' },
-  { record_id: 'rec-b', body: '연결된 기록 본문' },
+  { record_id: typedScenarioForView.record_id, body: '원본 연결 제목' },
+  { record_id: typedScenarioForView.target_ids.record, body: '연결된 기록 본문' },
 ];
-const projects = { 'project-a': { title: '생활 OS' } };
+const projects = { [typedScenarioForView.target_ids.project]: { title: '생활 OS' } };
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'record', target_id: 'rec-b', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
-  connectionRecords, projects,
-), { label: '연결된 기록 본문', href: '#record-rec-b' },
+  { kind: 'record', target_id: typedScenarioForView.target_ids.record, origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'record', label:'[기록] 연결된 기록 본문', href:`#record-${typedScenarioForView.target_ids.record}` },
   'record connections must resolve only against current raw records');
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'project', target_id: 'project-a', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
-  connectionRecords, projects,
-), { label: '생활 OS', href: '' },
+  { kind: 'project', target_id: typedScenarioForView.target_ids.project, origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'project', label:'[프로젝트] 생활 OS', href:'' },
   'project connections must resolve only against the projected project catalog');
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'record', target_id: 'gone', origin: 'auto' }, connectionRecords, projects,
-), { label: '대상 없음', href: '' }, 'unknown targets must not render a link');
+  { kind:'daily_note', target_id:typedScenarioForView.target_ids.daily_note, origin:'source' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'daily_note', label:'[하루 기록] 2026-08-23', href:'' },
+  'Daily Note connections use only their canonical graph date and never card navigation');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind:'record', target_id:'gone', origin:'auto' }, connectionRecords, projects,
+  canonicalProjection.graph_current,
+), { kind:'', label:'대상 없음', href:'' }, 'unknown graph targets must not render a link');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind:'project', target_id:typedScenarioForView.target_ids.record, origin:'auto' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'', label:'대상 없음', href:'' }, 'a connection kind cannot disagree with the graph target kind');
 assert.match(viewContracts.recordSearchText({ body: '기록', displayTags: [], detail: [], relatedItems: [
   { label: '생활 OS', href: '' },
 ] }), /생활 OS/, 'resolved related labels must be searchable');
@@ -1017,6 +1031,9 @@ assert.equal(flushStore.get('ep', {})['event-123'].transport, 'queued',
 const controlStore = makeMemoryStore();
 const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
   const LS = { er:'er', gr:'gr', gp:'gp' };
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('privacyDecisionIsCurrent')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
@@ -1024,8 +1041,12 @@ const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
   ${namedFunction('graphPendingForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('connectionCandidates')}
+  ${namedFunction('searchConnectionCandidates')}
   ${namedFunction('renderEnrichmentControls')}
-  return { privacyDecisionIsCurrent, graphPendingForRecord, enrichmentControlState, connectionCandidates, renderEnrichmentControls };
+  return {
+    privacyDecisionIsCurrent, graphPendingForRecord, enrichmentControlState,
+    connectionCandidates, searchConnectionCandidates, renderEnrichmentControls,
+  };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char])), controlStore, STATUS_REASON_LABEL);
@@ -1105,12 +1126,55 @@ assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_original', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3,
 }, editableRecord), false, 'a malformed dual-scoped privacy decision is never current');
 
-assert.deepEqual(controlContracts.connectionCandidates(editableRecord, {
-  targets:{ records:{ 'rec-a':{ title:'현재 기록' }, 'rec-b':{ title:'후보 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
-}), [
-  { kind:'record', target_id:'rec-b', label:'후보 기록' },
-  { kind:'project', target_id:'project-a', label:'생활 OS' },
-], 'connection controls must offer only sidecar catalog candidates and never the current record');
+const candidateSource = {
+  ...editableRecord, record_id:canonicalProjection.scenarios.source_only.record_id,
+  body:'현재 기록', date:'2026-08-23', connections:[],
+};
+const candidateRecordId = canonicalProjection.scenarios.auto_only.record_id;
+const candidateRecords = [candidateSource, {
+  record_id:candidateRecordId, body:'후보 기록', date:'2026-08-22',
+}];
+const candidateEnrichments = {
+  targets:{ records:{}, projects:{ [typedScenarioForView.target_ids.project]:{ title:'생활 OS' } } },
+};
+assert.deepEqual(controlContracts.connectionCandidates(
+  candidateSource, candidateRecords, candidateEnrichments, canonicalProjection.graph_current,
+).map(candidate => [candidate.kind, candidate.target_id, candidate.label]), [
+  ['record', candidateRecordId, '[기록] 후보 기록'],
+  ['project', typedScenarioForView.target_ids.project, '[프로젝트] 생활 OS'],
+  ['daily_note', typedScenarioForView.target_ids.daily_note, '[하루 기록] 2026-08-23'],
+], 'connection controls use the live graph catalog and distinguish all three target types');
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-08-23', candidateRecords, candidateEnrichments,
+  canonicalProjection.graph_current,
+).map(candidate => candidate.kind), ['daily_note'],
+  'an exact relevant date can find its Daily Note target');
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026', candidateRecords, candidateEnrichments,
+  canonicalProjection.graph_current,
+).filter(candidate => candidate.kind === 'daily_note'), [],
+  'a broad query never lists every Daily Note date');
+const deletedDailyGraph = structuredClone(canonicalProjection.graph_current);
+deletedDailyGraph.nodes.find(node => node.node_id === typedScenarioForView.target_ids.daily_note).deleted = true;
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-08-23', candidateRecords, candidateEnrichments, deletedDailyGraph,
+), [], 'deleted graph targets cannot return as connection candidates');
+const invalidDateGraph = structuredClone(canonicalProjection.graph_current);
+invalidDateGraph.nodes.find(node => node.node_id === typedScenarioForView.target_ids.daily_note).node_id = 'note-2026-99-99';
+invalidDateGraph.contains.forEach(edge => { if(edge.source_id === typedScenarioForView.target_ids.daily_note) edge.source_id = 'note-2026-99-99'; });
+invalidDateGraph.nodes.forEach(node => node.links.forEach(link => {
+  if(link.target_id === typedScenarioForView.target_ids.daily_note) link.target_id = 'note-2026-99-99';
+}));
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-99-99', candidateRecords, candidateEnrichments, invalidDateGraph,
+), [], 'a syntactically safe but impossible Daily Note date is not exposed');
+assert.equal(controlContracts.connectionCandidates({
+  ...candidateSource, connections:[{
+    kind:'project', target_id:typedScenarioForView.target_ids.project,
+  }],
+}, candidateRecords, candidateEnrichments, canonicalProjection.graph_current)
+  .some(candidate => candidate.target_id === typedScenarioForView.target_ids.project), false,
+  'an existing connection is omitted from the graph candidate list');
 
 const manyTagControls = controlContracts.renderEnrichmentControls({
   ...editableRecord, displayTags:['하나','둘','셋','넷'],
@@ -1128,6 +1192,9 @@ assert.doesNotMatch(manyConnectionControls, /data-enrich-connection-search[^>]*d
 const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASON_LABEL', 'enrichmentLoadState', 'ENRICH', 'ls', 'LS', `
   ${namedFunction('statusLabel')}
   ${namedFunction('recordDate')}
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('graphResultForRecord')}
@@ -1206,24 +1273,37 @@ assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
   'namespaced cards never derive a logical record ID from their DOM ID');
 assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
   'edit opening and connection search resolve records from data-record-id');
+assert.match(bindSource, /searchConnectionCandidates\(record, query, ALL, ENRICH, GRAPH\)/,
+  'interactive connection search uses the validated graph target catalog');
 const privacyEditor = cardContracts.renderEnrichmentEditor(privacyRecord, 'loaded', { targets:{ records:{}, projects:{} } });
 assert.match(privacyEditor, /allow_redacted[\s\S]*allow_original[\s\S]*skip_enrichment/,
   'privacy review keeps all three privacy actions behind its explicit edit control');
 
-const ranked = cardContracts.rankConnectionCandidates({ ...editableRecord, body:'ＡＩ 모바일 자동화', date:'2026-08-20' }, [
-  { record_id:'rec-z', body:'ai 자동화', displayTags:['모바일'], date:'2026-08-21' },
-  { record_id:'rec-b', body:'AI 자동화', displayTags:['모바일'], date:'2026-08-22' },
-  { record_id:'rec-a', body:'self', displayTags:[], date:'2026-08-23' },
-], { targets:{ records:{}, projects:{ 'project-a':{ title:'AI 자동화' } } } });
-assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_id}`), ['record:rec-b', 'record:rec-z', 'project:project-a'],
-  'recommendations use NFKC common-token score, newest date, and target ID ordering');
-assert.match(cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
-  { label:'관련 기록', href:'#record-rec-b' },
-  { label:'생활 OS', href:'' },
+const ranked = cardContracts.rankConnectionCandidates({
+  ...candidateSource, body:'ＡＩ 모바일 자동화', date:'2026-08-23',
+}, [candidateSource, {
+  record_id:candidateRecordId, body:'AI 자동화', displayTags:['모바일'], date:'2026-08-22',
+}], { targets:{ records:{}, projects:{
+  [typedScenarioForView.target_ids.project]:{ title:'AI 자동화' },
+} } }, canonicalProjection.graph_current);
+assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_id}`), [
+  `record:${candidateRecordId}`, `project:${typedScenarioForView.target_ids.project}`,
+  `daily_note:${typedScenarioForView.target_ids.daily_note}`,
+], 'recommendations use graph targets, NFKC common-token score, and relevant Daily Note dates');
+const typedMetadata = cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
+  { label:'[기록] 관련 기록', href:'#record-rec-b' },
+  { label:'[프로젝트] 생활 OS', href:'' },
+  { label:'[하루 기록] 2026-08-23', href:'' },
 ], connections:[
   { kind:'record', target_id:'rec-b' }, { kind:'project', target_id:'project-a' },
-] }), /분류·관계 메타데이터[\s\S]*태그[\s\S]*metadata-connections[\s\S]*연결[\s\S]*data-focus-record/,
+  { kind:'daily_note', target_id:'note-2026-08-23' },
+] });
+assert.match(typedMetadata, /분류·관계 메타데이터[\s\S]*태그[\s\S]*metadata-connections[\s\S]*연결[\s\S]*data-focus-record/,
   'metadata has labeled tags and neutral connected-record chips separate from external URLs');
+assert.equal((typedMetadata.match(/data-focus-record=/g) || []).length, 1,
+  'only record connections expose in-app card navigation');
+assert.match(typedMetadata, /\[프로젝트\] 생활 OS[\s\S]*\[하루 기록\] 2026-08-23/,
+  'project and Daily Note connections remain typed non-navigation chips');
 assert.match(html, /metadata-connections \.metadata-values\{[^}]*flex-wrap:nowrap[^}]*overflow:hidden/,
   'connection metadata is constrained to a single visible line');
 assert.match(html, /html\{-webkit-text-size-adjust:100%;text-size-adjust:100%\}/,
@@ -1285,7 +1365,9 @@ function makePreCutoverApp(records, initialSidecar) {
     ${namedFunction('canonicalizeQueuedEnrichment')}
     ${namedFunction('resolveEnrichmentReceipt')}
     ${namedFunction('validateEnrichments')}
+    ${namedFunction('validateGraphCurrent')}
     ${namedFunction('composeRecords')}
+    ${namedFunction('graphTargetCatalog')}
     ${namedFunction('resolveConnection')}
     ${namedFunction('resolveConnections')}
     ${namedFunction('recordDate')}

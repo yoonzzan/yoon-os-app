@@ -160,6 +160,8 @@
   .card .metadata-chip{display:inline-flex;align-items:center;gap:3px;min-height:24px;padding:2px 7px;border:1px solid var(--line);border-radius:99px;color:var(--ink);background:color-mix(in srgb,var(--card) 88%,var(--line));font-size:11px;text-decoration:none}
   .card button.metadata-chip{cursor:pointer;font:inherit}
   .card .metadata-chip.project::before{content:'▣';color:var(--dim)}
+  .card .metadata-chip.daily_note::before{content:'◷';color:var(--dim)}
+  .card .metadata-chip.document::before{content:'▤';color:var(--dim)}
   .card .metadata-chip.focused{outline:2px solid var(--accent);outline-offset:2px}
   .card.focused{outline:2px solid var(--accent);outline-offset:2px}
   .card .enrichment-issue{margin:7px 0 0;padding:7px 9px;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;background:color-mix(in srgb,var(--accent) 8%,var(--card));font-size:11.5px;color:var(--ink)}
@@ -1604,24 +1606,79 @@ function visibleEnrichmentIssue(record){
   const status = record && record.enrichmentStatus;
   return messages[status] ? { status, message:messages[status] } : null;
 }
-function resolveConnection(connection, records, projects){
-  const missing = { label:'대상 없음', href:'' };
+function graphTargetCatalog(graphCurrent, records, projects){
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { ok:false, targets:{} };
+  const rawRecords = Object.fromEntries((Array.isArray(records) ? records : [])
+    .filter(record => record && typeof record.record_id === 'string')
+    .map(record => [record.record_id, record]));
+  const projectCatalog = projects && typeof projects === 'object' && !Array.isArray(projects)
+    ? projects : {};
+  const targets = {};
+  for(const node of checked.value.nodes){
+    if(node.deleted || !['record','project','daily_note','document'].includes(node.kind)) continue;
+    if(node.kind === 'record'){
+      const record = rawRecords[node.node_id];
+      const body = record && typeof record.body === 'string' ? record.body.trim() : '';
+      if(!body) continue;
+      const text = [body, record.date, ...((record.displayTags || record.tags) || []), ...(record.detail || [])]
+        .filter(value => typeof value === 'string').join(' ');
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'record', label:`[기록] ${body}`, search_text:text,
+      };
+      continue;
+    }
+    if(node.kind === 'project'){
+      const project = projectCatalog[node.node_id];
+      const title = project && typeof project.title === 'string' ? project.title.trim() : '';
+      if(!title) continue;
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'project', label:`[프로젝트] ${title}`, search_text:title,
+      };
+      continue;
+    }
+    if(node.kind === 'daily_note'){
+      const match = /^note-(\d{4}-\d{2}-\d{2})$/.exec(node.node_id);
+      const parsed = match ? new Date(`${match[1]}T00:00:00Z`) : null;
+      if(!match || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0,10) !== match[1]) continue;
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'daily_note', label:`[하루 기록] ${match[1]}`, search_text:match[1],
+      };
+      continue;
+    }
+    targets[node.node_id] = {
+      node_id:node.node_id, kind:'document', label:`[문서] ${node.node_id}`, search_text:'',
+    };
+  }
+  return { ok:true, targets };
+}
+function resolveConnection(connection, records, projects, graphCurrent){
+  const missing = { kind:'', label:'대상 없음', href:'' };
   if(!connection || typeof connection !== 'object') return missing;
+  const graph = graphTargetCatalog(graphCurrent, records, projects);
+  if(graph.ok){
+    const target = graph.targets[connection.target_id];
+    if(!target || target.kind !== connection.kind) return missing;
+    return {
+      kind:target.kind, label:target.label,
+      href:target.kind === 'record' ? `#record-${target.node_id}` : '',
+    };
+  }
   if(connection.kind === 'record'){
     const target = (Array.isArray(records) ? records : []).find(record => record && record.record_id === connection.target_id);
     const label = target && typeof target.body === 'string' && target.body.trim();
-    return label ? { label, href:`#record-${connection.target_id}` } : missing;
+    return label ? { kind:'record', label:`[기록] ${label}`, href:`#record-${connection.target_id}` } : missing;
   }
   if(connection.kind === 'project'){
     const target = projects && typeof projects === 'object' ? projects[connection.target_id] : null;
     const label = target && typeof target.title === 'string' && target.title.trim();
-    return label ? { label, href:'' } : missing;
+    return label ? { kind:'project', label:`[프로젝트] ${label}`, href:'' } : missing;
   }
   return missing;
 }
-function resolveConnections(connections, records, projects){
+function resolveConnections(connections, records, projects, graphCurrent){
   return (Array.isArray(connections) ? connections : []).map(connection =>
-    resolveConnection(connection, records, projects));
+    resolveConnection(connection, records, projects, graphCurrent));
 }
 function recordSearchText(record){
   return [record && record.body, ...((record && record.displayTags) || []), ...((record && record.detail) || []),
@@ -1709,38 +1766,51 @@ function recordTokenSet(record){
   return new Set(([record && record.body, ...((record && record.displayTags) || [])].filter(value => typeof value === 'string').join(' ')
     .normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []));
 }
-function rankConnectionCandidates(record, records, enrichments){
-  const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
-  const catalogRecords = Array.isArray(records) ? records : [];
+function connectionCandidates(record, records, enrichments, graphCurrent){
+  const projects = enrichments && enrichments.targets
+    && enrichments.targets.projects && typeof enrichments.targets.projects === 'object'
+    ? enrichments.targets.projects : {};
+  const currentGraph = graphCurrent === undefined && typeof GRAPH !== 'undefined' ? GRAPH : graphCurrent;
+  const catalog = graphTargetCatalog(currentGraph, records, projects);
+  if(!catalog.ok) return [];
   const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
     .filter(connection => connection && typeof connection === 'object')
     .map(connection => `${connection.kind}:${connection.target_id}`));
-  const source = recordTokenSet(record), candidates = [];
-  const add = (kind, targetId, label, target, date) => {
-    if(!/^[A-Za-z0-9._-]{1,128}$/.test(targetId) || (kind === 'record' && targetId === record.record_id) || used.has(`${kind}:${targetId}`)) return;
-    const tokens = kind === 'project'
-      ? new Set(String(label || '').normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []) : recordTokenSet(target);
-    const score = [...source].filter(token => tokens.has(token)).length;
-    if(score) candidates.push({ kind, target_id:targetId, label:label || targetId, score,
-      date:kind === 'record' ? recordDate(target).getTime() : 0 });
-  };
-  for(const target of catalogRecords) add('record', target && target.record_id, target && (target.title || target.body), target, target && target.date);
-  for(const [targetId, target] of Object.entries(targets.projects && typeof targets.projects === 'object' ? targets.projects : {}))
-    add('project', targetId, target && target.title, target, '');
+  const order = { record:0, project:1, daily_note:2 };
+  return Object.values(catalog.targets)
+    .filter(target => target.kind in order && target.node_id !== record.record_id
+      && !used.has(`${target.kind}:${target.node_id}`))
+    .map(target => ({
+      kind:target.kind, target_id:target.node_id, label:target.label,
+      search_text:target.search_text,
+    }))
+    .sort((a,b) => order[a.kind]-order[b.kind] || a.target_id.localeCompare(b.target_id));
+}
+function rankConnectionCandidates(record, records, enrichments, graphCurrent){
+  const source = recordTokenSet(record), recordById = Object.fromEntries(
+    (Array.isArray(records) ? records : []).filter(item => item && typeof item.record_id === 'string')
+      .map(item => [item.record_id, item]),
+  );
+  const candidates = [];
+  for(const candidate of connectionCandidates(record, records, enrichments, graphCurrent)){
+    const target = candidate.kind === 'record' ? recordById[candidate.target_id] : null;
+    const tokens = candidate.kind === 'record' ? recordTokenSet(target)
+      : new Set(candidate.search_text.normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []);
+    const score = candidate.kind === 'daily_note'
+      ? Number(record && record.date === candidate.search_text)
+      : [...source].filter(token => tokens.has(token)).length;
+    if(score) candidates.push({ ...candidate, score,
+      date:candidate.kind === 'record' ? recordDate(target).getTime() : 0 });
+  }
   return candidates.sort((a,b) => b.score-a.score || b.date-a.date || a.target_id.localeCompare(b.target_id)).slice(0,10);
 }
-function connectionCandidates(record, enrichments){
-  const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
-  const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
-    .filter(connection => connection && typeof connection === 'object').map(connection => `${connection.kind}:${connection.target_id}`));
-  const candidates = [];
-  for(const [kind, entries] of [['record', targets.records || {}], ['project', targets.projects || {}]]){
-    for(const [target_id, target] of Object.entries(entries)){
-      if((kind === 'record' && target_id === record.record_id) || used.has(`${kind}:${target_id}`)) continue;
-      candidates.push({ kind, target_id, label:(target && target.title) || target_id });
-    }
-  }
-  return candidates;
+function searchConnectionCandidates(record, query, records, enrichments, graphCurrent){
+  const normalized = typeof query === 'string' ? query.trim().normalize('NFKC').toLowerCase() : '';
+  if(!normalized) return [];
+  return connectionCandidates(record, records, enrichments, graphCurrent).filter(candidate => {
+    if(candidate.kind === 'daily_note' && normalized !== candidate.search_text.toLowerCase()) return false;
+    return candidate.search_text.normalize('NFKC').toLowerCase().includes(normalized);
+  }).slice(0,20);
 }
 function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='main'){
   const state = enrichmentControlState(record, sidecarState);
@@ -1758,6 +1828,12 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
   const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
   const tagFacts = Array.isArray(record.displayTagOrigins) ? record.displayTagOrigins : [];
   const connections = Array.isArray(record.connections) ? record.connections : [];
+  const typeLabels = { record:'기록', project:'프로젝트', daily_note:'하루 기록', document:'문서' };
+  const connectionLabels = connections.map((connection, index) => {
+    const related = Array.isArray(record.relatedItems) ? record.relatedItems[index] : null;
+    return related && typeof related.label === 'string' && related.label
+      ? related.label : `[${typeLabels[connection && connection.kind] || '연결'}] 대상 없음`;
+  });
   if(!['completed','retry_wait','failed','skipped'].includes(record.enrichmentStatus)) return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
     <h4>수정</h4><p>태그와 연결 수정은 반영이 확인될 때까지 대기 상태로 표시됩니다.</p>
@@ -1765,15 +1841,15 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
       `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-graph-normalized-key="${esc(tagFacts[index] && tagFacts[index].normalized_key || '')}" aria-label="${esc(tag)} 태그 삭제"${tagFacts[index] && tagFacts[index].normalized_key ? '' : ' disabled'}>×</button></span>`).join('')}</div>` : ''}
     <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="256">
     <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag">태그 추가</button></div>
-    ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map(connection =>
-      `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_link" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" data-graph-relation="${esc(connection.relation)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
+    ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map((connection, index) =>
+      `<span>${esc(connectionLabels[index])} <button type="button" data-upload-control data-enrich-action="remove_link" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" data-graph-relation="${esc(connection.relation)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
     <label>추천 연결</label><div class="enrich-search-results" data-enrich-recommendations></div>
-    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"><div class="enrich-search-results" data-enrich-search-results></div>
+    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록·프로젝트·하루 기록 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록·프로젝트·하루 기록 검색" maxlength="80"><div class="enrich-search-results" data-enrich-search-results></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
 }
 function renderConnectionRecommendations(record, enrichments){
-  const candidates = rankConnectionCandidates(record, ALL, enrichments);
-  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}">${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
+  const candidates = rankConnectionCandidates(record, ALL, enrichments, GRAPH);
+  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}">${esc(candidate.label)}</button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
 }
 function renderEnrichmentIssue(record){
   const issue = visibleEnrichmentIssue(record);
@@ -1793,7 +1869,7 @@ function renderRecordMetadata(record, viewKey='main'){
     ${tags.length ? `<div class="metadata-row"><span class="metadata-label">태그</span><div class="metadata-values">${tags.map(tag => `<span class="metadata-chip">#${esc(tag)}</span>`).join('')}</div></div>` : ''}
     ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
       ? `<button type="button" class="metadata-chip" data-focus-record="${esc(item.connection.target_id)}" aria-label="연결된 기록 ${esc(item.label)} 열기">🔗 ${esc(item.label)}</button>`
-      : `<span class="metadata-chip project">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
+      : `<span class="metadata-chip ${esc(item.connection && item.connection.kind || 'project')}">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
   </section>`;
 }
 function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main'){
@@ -1811,7 +1887,7 @@ function prepData(){
   const graphCurrent = typeof GRAPH === 'undefined' ? null : GRAPH;
   ALL = composeRecords(sourceRecords, ENRICH, graphCurrent).map((r, order) => {
     const _d = recordDate(r);
-    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects),
+    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects, graphCurrent),
       _d, _at:recordSavedAt(r, _d), _order:order};
   }).sort((a,b) => b._at - a._at || a._order - b._order);
 }
@@ -2043,16 +2119,10 @@ function bind(el){
     if(search) search.oninput = () => {
       const results = c.querySelector('[data-enrich-search-results]');
       const record = ALL.find(item => item && item.record_id === c.dataset.recordId);
-      const query = search.value.trim().toLowerCase();
+      const query = search.value.trim();
       if(!results || !record || !query) { if(results) results.innerHTML = ''; return; }
-      const used = new Set((record.connections || []).map(item => `${item.kind}:${item.target_id}`));
-      const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects || {};
-      const candidates = [
-        ...ALL.map(item => ({ kind:'record', target_id:item.record_id, label:item.body || '', text:`${item.body || ''} ${(item.displayTags || []).join(' ')}` })),
-        ...Object.entries(projects).map(([target_id, item]) => ({ kind:'project', target_id, label:item.title || target_id, text:item.title || '' })),
-      ].filter(item => item.target_id && !(item.kind === 'record' && item.target_id === record.record_id)
-        && !used.has(`${item.kind}:${item.target_id}`) && item.text.toLowerCase().includes(query)).slice(0,20);
-      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)} <small>${item.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('');
+      const candidates = searchConnectionCandidates(record, query, ALL, ENRICH, GRAPH);
+      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)}</button>`).join('');
       results.querySelectorAll('[data-enrich-action]').forEach(button => { button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); }; });
     };
   });
