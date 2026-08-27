@@ -169,7 +169,7 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   assert.equal(validateGraphCurrent(casefoldGraph).ok, true,
     'a valid Python-casefolded tag key must not be rejected by JavaScript lowercasing');
   assert.deepEqual(composeGraphFacts(casefoldGraph).records[scenarioRecord('source_only').record_id].tags,
-    [{ value:'Straße', origin:'source' }],
+    [{ value:'Straße', normalized_key:'strasse', origin:'source' }],
     'a casefolded graph tag retains its projector-provided raw display value');
   const cherokeeCasefoldGraph = structuredClone(graphCurrent);
   const cherokeeTag = cherokeeCasefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
@@ -442,6 +442,7 @@ function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', b
     ${namedFunction('normalizeEnrichmentTag')}
     ${namedFunction('validateGraphCurrent')}
     ${namedFunction('graphCacheKeys')}
+    async function reconcileGraphPending() {}
     ${namedFunction('loadGraphCurrent')}
     return async () => { await loadGraphCurrent(); return { GRAPH, graphLoadState }; };
   `)(gh, decode, {
@@ -687,6 +688,98 @@ const eventCatalog = {
 };
 const eventBase = { event_id: 'event-123', client_created_at: EVENT_TIME, record:eventRecord };
 
+const graphCommandContracts = new Function(`
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('canonicalizeQueuedGraphCommand')}
+  ${namedFunction('buildGraphCommand')}
+  ${namedFunction('resolveGraphReceipt')}
+  ${namedFunction('validateGraphFailureReceipt')}
+  return {
+    validateGraphCurrent, canonicalizeQueuedGraphCommand, buildGraphCommand,
+    resolveGraphReceipt, validateGraphFailureReceipt,
+  };
+`)();
+const GRAPH_EVENT_ID = `graph-user-${'a'.repeat(32)}`;
+const graphCurrent = canonicalProjection.graph_current;
+const graphSourceId = canonicalProjection.scenarios.source_only.record_id;
+const graphSourceNode = graphCurrent.nodes.find(node => node.node_id === graphSourceId);
+const graphRecord = { record_id:graphSourceId, content_hash:graphSourceNode.content_hash };
+const graphBase = { event_id:GRAPH_EVENT_ID, client_created_at:EVENT_TIME, record:graphRecord };
+const graphAddTag = graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, raw_display_value:'Straße', injected:'must-not-survive',
+}, graphCurrent);
+assert.deepEqual(graphAddTag, { ok:true, value:{
+  schema_version:1, event_id:GRAPH_EVENT_ID, node_id:graphSourceId,
+  action:'add_tag', client_created_at:EVENT_TIME,
+  facts:[{ kind:'tag', raw_display_value:'Straße' }],
+} }, 'the browser sends only a raw tag display and leaves Unicode normalization to Python');
+assert.doesNotMatch(JSON.stringify(graphAddTag.value), /normalized_key|content_hash|source_hash|provenance/,
+  'an add-tag command must not invent backend-owned normalization, scope, or provenance fields');
+
+const currentTag = graphSourceNode.tags[0];
+assert.deepEqual(graphCommandContracts.buildGraphCommand('remove_tag', {
+  ...graphBase, normalized_key:currentTag.normalized_key,
+}, graphCurrent).value.facts, [{ kind:'tag', normalized_key:currentTag.normalized_key }],
+  'tag removal reuses the exact normalized key projected by Python');
+assert.equal(graphCommandContracts.buildGraphCommand('remove_tag', {
+  ...graphBase, normalized_key:'STRASSE',
+}, graphCurrent).ok, false, 'the browser cannot synthesize a replacement normalized key');
+
+const typedScenario = canonicalProjection.scenarios.typed_links;
+const typedSourceNode = graphCurrent.nodes.find(node => node.node_id === typedScenario.record_id);
+const typedRecord = { record_id:typedSourceNode.node_id, content_hash:typedSourceNode.content_hash };
+const recordLink = typedSourceNode.links.find(link => link.relation === 'related');
+assert.deepEqual(graphCommandContracts.buildGraphCommand('remove_link', {
+  ...graphBase, record:typedRecord,
+  connection:{ target_id:recordLink.target_id, relation:recordLink.relation },
+}, graphCurrent).value.facts, [{
+  kind:'link', target_id:recordLink.target_id, relation:'related',
+}], 'link removal preserves the projected typed relation');
+assert.deepEqual(graphCommandContracts.buildGraphCommand('add_link', {
+  ...graphBase,
+  connection:{ target_id:typedScenario.target_ids.project, relation:'related_project' },
+}, graphCurrent).value.facts, [{
+  kind:'link', target_id:typedScenario.target_ids.project, relation:'related_project',
+}], 'link addition derives a relation that matches the graph target kind');
+assert.equal(graphCommandContracts.buildGraphCommand('add_link', {
+  ...graphBase,
+  connection:{ target_id:typedScenario.target_ids.project, relation:'related' },
+}, graphCurrent).ok, false, 'a relation that disagrees with the target kind is rejected');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, event_id:'event-123', raw_display_value:'tag',
+}, graphCurrent).ok, false, 'legacy event IDs cannot enter the graph pending path');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, record:{ ...graphRecord, content_hash:HASH_B }, raw_display_value:'tag',
+}, graphCurrent).reason, 'stale_scope', 'a command created against stale record content remains local');
+
+assert.equal(graphCommandContracts.validateGraphCurrent(graphCurrent).ok, true,
+  'the app-first graph projection without receipts remains readable');
+const graphWithReceipt = structuredClone(graphCurrent);
+graphWithReceipt.event_receipts = {
+  [GRAPH_EVENT_ID]:{ status:'applied', safe_reason:'applied' },
+};
+assert.equal(graphCommandContracts.validateGraphCurrent(graphWithReceipt).ok, true,
+  'the post-cutover graph projection accepts exact user receipts');
+const invalidGraphReceipt = structuredClone(graphWithReceipt);
+invalidGraphReceipt.event_receipts['graph-source-event'] = { status:'applied', safe_reason:'applied' };
+assert.equal(graphCommandContracts.validateGraphCurrent(invalidGraphReceipt).ok, false,
+  'source and auto graph events cannot appear in the user receipt ledger');
+assert.deepEqual(graphCommandContracts.resolveGraphReceipt(graphAddTag.value, graphCurrent), {
+  state:'waiting', reason:'',
+}, 'a successful upload remains pending while its exact graph receipt is absent');
+assert.deepEqual(graphCommandContracts.resolveGraphReceipt(graphAddTag.value, graphWithReceipt), {
+  state:'applied', reason:'applied',
+}, 'only the exact applied graph receipt completes the command');
+const safeFailure = {
+  byte_size:123, content_sha256:'b'.repeat(64), filename:`${GRAPH_EVENT_ID}.json`,
+  reason_code:'invalid_tag', status:'permanently_invalid',
+};
+assert.deepEqual(graphCommandContracts.validateGraphFailureReceipt(safeFailure, GRAPH_EVENT_ID), {
+  state:'failed', reason:'invalid_tag',
+}, 'a sanitized terminal failure can stop retrying the exact event');
+assert.equal(graphCommandContracts.validateGraphFailureReceipt({ ...safeFailure, raw:'secret' }, GRAPH_EVENT_ID), null,
+  'terminal failure receipts reject extra raw fields');
+
 const addTag = eventContracts.buildEnrichmentEvent('add_tag', {
   ...eventBase, tag:' ##  새로운   태그 ', origin:'forbidden', provider:'forbidden',
 }, eventCatalog);
@@ -806,6 +899,20 @@ assert.equal(putCalls[0].path, 'enrichment/pending/event-123.json',
 assert.deepEqual(JSON.parse(putCalls[0].options.body).message, 'enrichment: add_tag event-123',
   'the commit message may contain only the safe action and event ID');
 
+const graphPutCalls = [];
+const graphPutContract = new Function('gh', 'b64encode', 'cfg', `
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('canonicalizeQueuedGraphCommand')}
+  ${namedFunction('putGraphCommand')}
+  return putGraphCommand;
+`)(async (path, options) => { graphPutCalls.push({ path, options }); return {}; }, value => `encoded:${value}`, {});
+await graphPutContract(graphAddTag.value, graphCurrent);
+assert.equal(graphPutCalls.length, 1, 'a canonical graph command may issue one PUT');
+assert.equal(graphPutCalls[0].path, `graph/pending/${GRAPH_EVENT_ID}.json`,
+  'graph corrections write only to their immutable graph pending path');
+assert.equal(JSON.parse(graphPutCalls[0].options.body).message, `graph: add_tag ${GRAPH_EVENT_ID}`,
+  'graph commit messages contain only the safe action and event ID');
+
 function makeMemoryStore(seed = {}) {
   const state = new Map(Object.entries(seed));
   return {
@@ -829,6 +936,51 @@ function makeQueueContracts(store, put) {
     return { flushEnrichments, queueEnrichment, submitEnrichmentEvent };
   `)(store, put, eventCatalog.records, { targets:{ projects:eventCatalog.projects } });
 }
+
+function makeGraphQueueContracts(store, put, graph, failureReceipt = async () => null) {
+  return new Function('ls', 'putGraphCommand', 'GRAPH', 'loadGraphFailureReceipt', 'toast', `
+    const LS = { gq:'gq', gx:'gx', gp:'gp', gr:'gr' };
+    ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('canonicalizeQueuedGraphCommand')}
+    ${namedFunction('buildGraphCommand')}
+    ${namedFunction('resolveGraphReceipt')}
+    ${namedFunction('quarantineGraph')}
+    ${namedFunction('markGraphPending')}
+    ${namedFunction('flushGraphCommands')}
+    ${namedFunction('queueGraphCommand')}
+    ${namedFunction('submitGraphCommand')}
+    ${namedFunction('reconcileGraphPending')}
+    return { flushGraphCommands, queueGraphCommand, submitGraphCommand, reconcileGraphPending };
+  `)(store, put, graph, failureReceipt, () => {});
+}
+
+const offlineGraph = structuredClone(graphCurrent);
+const offlineGraphStore = makeMemoryStore();
+const offlineGraphQueue = makeGraphQueueContracts(
+  offlineGraphStore, async () => { throw new Error('offline'); }, offlineGraph,
+);
+const offlineGraphResult = await offlineGraphQueue.submitGraphCommand('add_tag', {
+  ...graphBase, raw_display_value:'offline graph tag',
+});
+assert.equal(offlineGraphResult.transport, 'offline',
+  'a graph transport failure keeps the canonical command in its separate offline queue');
+assert.deepEqual(offlineGraphStore.get('gq', []), [offlineGraphResult.value],
+  'the graph offline queue stores only the canonical command schema');
+assert.deepEqual(offlineGraphStore.get('gp', {})[GRAPH_EVENT_ID], {
+  event_id:GRAPH_EVENT_ID, record_id:graphSourceId, action:'add_tag', transport:'offline',
+}, 'an offline graph command is pending, not applied');
+await offlineGraphQueue.reconcileGraphPending();
+assert.ok(offlineGraphStore.get('gp', {})[GRAPH_EVENT_ID],
+  'a missing graph receipt leaves the command pending across refreshes');
+offlineGraph.event_receipts = {
+  [GRAPH_EVENT_ID]:{ status:'applied', safe_reason:'applied' },
+};
+await offlineGraphQueue.reconcileGraphPending();
+assert.deepEqual(offlineGraphStore.get('gp', {}), {},
+  'the exact applied graph receipt clears the pending command');
+assert.deepEqual(offlineGraphStore.get('gr', {})[graphSourceId], {
+  event_id:GRAPH_EVENT_ID, state:'applied', reason:'applied',
+}, 'receipt reconciliation stores only a safe per-record result');
 
 const offlineStore = makeMemoryStore();
 const offline = makeQueueContracts(offlineStore, async () => { throw new Error('offline'); });
@@ -861,10 +1013,11 @@ assert.equal(flushStore.get('ep', {})['event-123'].transport, 'queued',
 
 const controlStore = makeMemoryStore();
 const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
-  const LS = { er:'er' };
+  const LS = { er:'er', gr:'gr' };
   ${namedFunction('privacyDecisionIsCurrent')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('graphResultForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('connectionCandidates')}
   ${namedFunction('renderEnrichmentControls')}
@@ -875,18 +1028,19 @@ const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
 
 const editableRecord = {
   record_id:'rec-a', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3, enrichmentStatus:'completed',
-  displayTags:['하나'], connections:[],
+  displayTags:['하나'], displayTagOrigins:[{ value:'하나', normalized_key:'하나', origin:'user' }],
+  connections:[], graphCurrent:true,
 };
 assert.deepEqual(controlContracts.enrichmentControlState(editableRecord, 'loaded'), {
-  enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_connection','remove_connection'],
+  enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_link','remove_link'],
   tagSlots:2, connectionSlots:3,
-}, 'a compatible, currently scoped ordinary record exposes compact correction controls');
+}, 'a current graph record exposes compact graph correction controls');
 assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, record_id:'' }, 'loaded').enabled, false,
-  'a missing record ID must disable every enrichment action');
-assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, redaction_version:0 }, 'loaded').enabled, false,
-  'a missing current redaction version must disable every enrichment action');
-assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatible').enabled, false,
-  'an incompatible sidecar must not expose write actions');
+  'a missing record ID must disable every graph action');
+assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, graphCurrent:false }, 'loaded').enabled, false,
+  'a record without an exact current graph node must not expose graph writes');
+assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatible').enabled, true,
+  'ordinary graph corrections remain independent from an incompatible enrichment sidecar');
 
 const privacyRecord = { ...editableRecord, enrichmentStatus:'privacy_review_required' };
 assert.deepEqual(controlContracts.enrichmentControlState(privacyRecord, 'cached'), {
@@ -899,7 +1053,7 @@ const privacyControls = controlContracts.renderEnrichmentControls(privacyRecord,
 assert.match(privacyControls, /data-enrich-action="allow_redacted"/, 'privacy controls include redacted permission');
 assert.match(privacyControls, /data-enrich-action="allow_original"/, 'privacy controls include original permission');
 assert.match(privacyControls, /data-enrich-action="skip_enrichment"/, 'privacy controls include skip permission');
-assert.doesNotMatch(privacyControls, /add_tag|add_connection/, 'privacy controls must not mix in ordinary correction actions');
+assert.doesNotMatch(privacyControls, /add_tag|add_link/, 'privacy controls must not mix in ordinary graph correction actions');
 const pendingControls = controlContracts.renderEnrichmentControls({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', {
   targets:{ records:{}, projects:{} },
 });
@@ -951,6 +1105,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   ${namedFunction('recordDate')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('graphResultForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('visibleEnrichmentIssue')}
   ${namedFunction('renderEnrichmentIssue')}
@@ -965,7 +1120,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   return { visibleEnrichmentIssue, renderEnrichmentIssue, rankConnectionCandidates, renderRecordMetadata, renderEnrichmentEditor, card };
 `)(value => String(value).replace(/[&<>\"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;',
-}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er' });
+}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er', gr:'gr' });
 
 for(const status of ['completed', 'pending', 'skipped']){
   const rendered = cardContracts.card({ ...editableRecord, type:'memo', body:'정상 본문', date:'2026-08-24',
@@ -987,8 +1142,8 @@ assert.match(cardContracts.renderEnrichmentIssue({ ...privacyRecord, type:'memo'
   'privacy review renders a concise issue rather than raw diagnostic fields');
 for(const sidecarState of ['unavailable', 'incompatible']){
   const editor = cardContracts.renderEnrichmentEditor(editableRecord, sidecarState, { targets:{ records:{}, projects:{} } });
-  assert.match(editor, /data-enrich-edit[^>]*disabled[^>]*분석 상태를 확인한 뒤 수정 가능/,
-    `${sidecarState} sidecars disable editing with an accessible reason`);
+  assert.match(editor, /data-enrich-edit(?![^>]*disabled)/,
+    `${sidecarState} enrichment sidecars do not disable a current graph editor`);
 }
 const pendingEditor = cardContracts.renderEnrichmentEditor({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', { targets:{ records:{}, projects:{} } });
 assert.match(pendingEditor, /data-enrich-edit[^>]*disabled[^>]*분석 완료 전에는 수정할 수 없음/,
@@ -1118,6 +1273,7 @@ function makePreCutoverApp(records, initialSidecar) {
     ${namedFunction('submitEnrichmentEvent')}
     ${namedFunction('reconcileEnrichmentPending')}
     ${namedFunction('loadEnrichments')}
+    function flushGraphCommands() {}
     ${namedFunction('loadData')}
     return {
       loadData, submitEnrichmentEvent,

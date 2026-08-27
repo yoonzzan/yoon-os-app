@@ -326,7 +326,8 @@ const LS = {
   cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data', p:'yz-proj',
   e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at',
   eq:'yz-enrich-queue', ex:'yz-enrich-quarantine', ep:'yz-enrich-pending',
-  er:'yz-enrich-results'
+  er:'yz-enrich-results', gq:'yz-graph-queue', gx:'yz-graph-quarantine',
+  gp:'yz-graph-pending', gr:'yz-graph-results'
 };
 
 const TYPES = [
@@ -539,6 +540,23 @@ async function putEnrichment(entry, catalog){
               'Content-Type':'application/json' },
     body: JSON.stringify({
       message:`enrichment: ${payload.action} ${payload.event_id}`,
+      content:b64encode(JSON.stringify(payload, null, 1))
+    })
+  });
+  return payload;
+}
+
+/* Graph corrections use their own immutable path and never reuse enrichment facts. */
+async function putGraphCommand(entry, graphCurrent){
+  const checked = canonicalizeQueuedGraphCommand(entry, graphCurrent);
+  if(!checked.ok) throw new Error(checked.reason);
+  const payload = checked.value;
+  await gh(`graph/pending/${payload.event_id}.json`, {
+    method:'PUT',
+    headers:{ 'Authorization':`Bearer ${cfg.token}`, 'Accept':'application/vnd.github+json',
+              'Content-Type':'application/json' },
+    body:JSON.stringify({
+      message:`graph: ${payload.action} ${payload.event_id}`,
       content:b64encode(JSON.stringify(payload, null, 1))
     })
   });
@@ -801,7 +819,7 @@ function validateEnrichments(value){
 /* The graph is untrusted browser input. Validate its complete app-readable shape before
    deriving facts, so a malformed node cannot selectively overwrite a raw record. */
 function validateGraphCurrent(value){
-  const empty = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
+  const empty = { schema_version:1, projection_sequence:0, nodes:[], contains:[], event_receipts:{} };
   const safeId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id);
   const safeHash = hash => typeof hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(hash);
   const safeText = (text, limit, multiline = false) => {
@@ -834,10 +852,23 @@ function validateGraphCurrent(value){
   const safeRelation = value => ['related','related_project','previous_note','source_reference'].includes(value);
   const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
   try{
+    const topLevelKeys = Object.keys(value || {});
+    const appFirstKeys = ['schema_version','projection_sequence','nodes','contains'];
+    const receiptKeys = [...appFirstKeys, 'event_receipts'];
+    const topLevelShape = topLevelKeys.length === appFirstKeys.length
+      ? topLevelKeys.every(key => appFirstKeys.includes(key))
+      : topLevelKeys.length === receiptKeys.length && topLevelKeys.every(key => receiptKeys.includes(key));
     if(!isObject(value) || value.schema_version !== 1 || !Number.isInteger(value.projection_sequence)
        || value.projection_sequence < 0 || !Array.isArray(value.nodes) || !Array.isArray(value.contains)
-       || !Object.keys(value).every(key => ['schema_version','projection_sequence','nodes','contains'].includes(key))
+       || !topLevelShape || (value.event_receipts !== undefined && !isObject(value.event_receipts))
        || value.nodes.length > 10000 || value.contains.length > 10000) throw new Error('unsupported schema');
+    const eventReceipts = {};
+    for(const [eventId, receipt] of Object.entries(value.event_receipts || {})){
+      if(!/^graph-user-[0-9a-f]{32}$/.test(eventId) || !isObject(receipt)
+         || Object.keys(receipt).length !== 2 || receipt.status !== 'applied'
+         || receipt.safe_reason !== 'applied') throw new Error('invalid graph receipt');
+      eventReceipts[eventId] = { status:'applied', safe_reason:'applied' };
+    }
     const nodes = {}, nodeKinds = {}, tagKeysByNode = {};
     for(const node of value.nodes){
       if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','document','tag'].includes(node.kind)
@@ -876,7 +907,7 @@ function validateGraphCurrent(value){
         }
         if(!Object.keys(tag).every(key => base.has(key))) throw new Error('invalid tag field');
         tagKeys.add(tag.normalized_key);
-        tags.push({ value:tag.raw_display_value, origin:tag.origin });
+        tags.push({ value:tag.raw_display_value, normalized_key:tag.normalized_key, origin:tag.origin });
       }
       const links = [], linkKeys = new Set();
       for(const link of node.links){
@@ -930,7 +961,7 @@ function validateGraphCurrent(value){
       containsKeys.add(`${edge.source_id}:${edge.target_id}`); contains.push({ source_id:edge.source_id, target_id:edge.target_id });
     }
     return { ok:true, value:{ schema_version:1, projection_sequence:value.projection_sequence,
-      nodes:Object.values(checkedNodes), contains } };
+      nodes:Object.values(checkedNodes), contains, event_receipts:eventReceipts } };
   }catch(error){ return { ok:false, value:empty }; }
 }
 
@@ -972,8 +1003,11 @@ function composeRecords(records, enrichments, graphCurrent){
     const graphFacts = graph.ok && graph.records[record.record_id];
     const facts = graphFacts && graphFacts.content_hash === record.content_hash ? {
       displayTags:graphFacts.tags.map(tag => tag.value),
-      displayTagOrigins:graphFacts.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
+      displayTagOrigins:graphFacts.tags.map(tag => ({
+        value:tag.value, normalized_key:tag.normalized_key, origin:tag.origin,
+      })),
       connections:graphFacts.connections,
+      graphCurrent:true,
     } : legacyFacts;
     return { ...record, ...facts, ...status };
   });
@@ -1020,7 +1054,11 @@ async function loadGraphCurrent(){
     j = await gh('graph-current.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
   }catch(error){
     const checked = validateGraphCurrent(ls.get(cache.current, null));
-    if(checked.ok){ GRAPH = checked.value; graphLoadState = 'cached'; return GRAPH; }
+    if(checked.ok){
+      GRAPH = checked.value; graphLoadState = 'cached';
+      await reconcileGraphPending();
+      return GRAPH;
+    }
     GRAPH = checked.value; graphLoadState = 'unavailable'; return GRAPH;
   }
   let checked;
@@ -1029,6 +1067,7 @@ async function loadGraphCurrent(){
   if(!checked.ok){ GRAPH = checked.value; graphLoadState = 'incompatible'; return GRAPH; }
   GRAPH = checked.value; graphLoadState = 'loaded';
   ls.set(cache.current, GRAPH); ls.set(cache.etag, j.sha || j.etag || ''); ls.set(cache.at, Date.now());
+  await reconcileGraphPending();
   return GRAPH;
 }
 
@@ -1040,7 +1079,7 @@ async function loadData(){
   if(recordsResult.status !== 'fulfilled') throw recordsResult.reason;
   const d = JSON.parse(b64decode(recordsResult.value.content));
   DATA = d; ls.set(LS.d, d);
-  prepData(); flushEnrichments(false);
+  prepData(); flushEnrichments(false); flushGraphCommands(false);
   return d;
 }
 
@@ -1048,6 +1087,12 @@ async function loadData(){
 function newId(){
   const d = new Date(), p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(36).slice(2,6)}`;
+}
+function newGraphEventId(){
+  if(!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') return '';
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `graph-user-${Array.from(bytes, byte => byte.toString(16).padStart(2,'0')).join('')}`;
 }
 function nowLocal(){
   const d = new Date(), p = n => String(n).padStart(2,'0');
@@ -1181,6 +1226,121 @@ function currentEnrichmentCatalog(){
   return { records:Array.isArray(ALL) ? ALL : [],
     projects:ENRICH && ENRICH.targets && ENRICH.targets.projects || {} };
 }
+function canonicalizeQueuedGraphCommand(entry, graphCurrent){
+  const fail = reason => ({ ok:false, reason });
+  const checked = validateGraphCurrent(graphCurrent);
+  const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+  const exactKeys = (value, keys) => isObject(value) && Object.keys(value).length === keys.length
+    && Object.keys(value).every(key => keys.includes(key));
+  const safeText = (value, limit) => {
+    const points = typeof value === 'string' ? Array.from(value) : [];
+    return points.length > 0 && points.length <= limit
+      && !points.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
+  if(!checked.ok || !exactKeys(entry, [
+    'schema_version','event_id','node_id','action','client_created_at','facts',
+  ]) || entry.schema_version !== 1 || !/^graph-user-[0-9a-f]{32}$/.test(entry.event_id)
+     || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(entry.client_created_at)
+     || Number.isNaN(new Date(entry.client_created_at).getTime()) || !Array.isArray(entry.facts)
+     || entry.facts.length !== 1 || !['add_tag','remove_tag','add_link','remove_link'].includes(entry.action))
+    return fail('invalid_event');
+  const nodes = Object.fromEntries(checked.value.nodes.map(node => [node.node_id, node]));
+  const source = nodes[entry.node_id];
+  if(!source || source.kind !== 'record' || source.deleted) return fail('unknown_record');
+  const fact = entry.facts[0];
+  if(entry.action === 'add_tag'){
+    if(!exactKeys(fact, ['kind','raw_display_value']) || fact.kind !== 'tag'
+       || !safeText(fact.raw_display_value, 256)) return fail('invalid_tag');
+    return { ok:true, value:{ ...entry, facts:[{
+      kind:'tag', raw_display_value:fact.raw_display_value,
+    }] } };
+  }
+  if(entry.action === 'remove_tag'){
+    if(!exactKeys(fact, ['kind','normalized_key']) || fact.kind !== 'tag'
+       || !safeText(fact.normalized_key, 80)) return fail('invalid_tag');
+    return { ok:true, value:{ ...entry, facts:[{
+      kind:'tag', normalized_key:fact.normalized_key,
+    }] } };
+  }
+  const optionalReason = entry.action === 'add_link' && Object.prototype.hasOwnProperty.call(fact || {}, 'reason');
+  const linkKeys = optionalReason
+    ? ['kind','target_id','relation','reason'] : ['kind','target_id','relation'];
+  if(!exactKeys(fact, linkKeys) || fact.kind !== 'link'
+     || !/^[A-Za-z0-9._-]{1,128}$/.test(fact.target_id || '') || fact.target_id === entry.node_id
+     || !['related','related_project','previous_note','source_reference'].includes(fact.relation)
+     || (optionalReason && !safeText(fact.reason, 4096))) return fail('invalid_connection');
+  const target = nodes[fact.target_id];
+  const relations = { record:'related', project:'related_project', daily_note:'previous_note', document:'source_reference' };
+  if(!target || target.deleted || !relations[target.kind] || relations[target.kind] !== fact.relation)
+    return fail('unknown_connection');
+  const safeFact = { kind:'link', target_id:fact.target_id, relation:fact.relation };
+  if(optionalReason) safeFact.reason = fact.reason;
+  return { ok:true, value:{ ...entry, facts:[safeFact] } };
+}
+function buildGraphCommand(action, input, graphCurrent){
+  const fail = reason => ({ ok:false, reason });
+  if(!input || typeof input !== 'object' || !input.record || typeof input.record !== 'object')
+    return fail('invalid_event');
+  const base = {
+    schema_version:1, event_id:input.event_id, node_id:input.record.record_id,
+    action, client_created_at:input.client_created_at, facts:[],
+  };
+  if(action === 'add_tag'){
+    const raw = typeof input.raw_display_value === 'string'
+      ? input.raw_display_value.trim() : typeof input.tag === 'string' ? input.tag.trim() : '';
+    base.facts = [{ kind:'tag', raw_display_value:raw }];
+  }else if(action === 'remove_tag'){
+    base.facts = [{ kind:'tag', normalized_key:input.normalized_key }];
+  }else if(action === 'add_link' || action === 'remove_link'){
+    const connection = input.connection || {};
+    base.facts = [{ kind:'link', target_id:connection.target_id, relation:connection.relation }];
+    if(action === 'add_link' && typeof connection.reason === 'string' && connection.reason)
+      base.facts[0].reason = connection.reason;
+  }else return fail('invalid_action');
+  const checked = canonicalizeQueuedGraphCommand(base, graphCurrent);
+  if(!checked.ok) return checked;
+  const graph = validateGraphCurrent(graphCurrent).value;
+  const source = graph.nodes.find(node => node.node_id === base.node_id);
+  if(typeof input.record.content_hash !== 'string' || source.content_hash !== input.record.content_hash)
+    return fail('stale_scope');
+  if(action === 'remove_tag' && !source.tags.some(tag => tag.normalized_key === input.normalized_key))
+    return fail('unknown_tag');
+  if(action === 'remove_link' && !source.links.some(link =>
+    link.target_id === input.connection.target_id && link.relation === input.connection.relation))
+    return fail('unknown_connection');
+  if(action === 'add_link' && source.links.some(link =>
+    link.target_id === input.connection.target_id && link.relation === input.connection.relation))
+    return fail('duplicate_connection');
+  return checked;
+}
+function resolveGraphReceipt(pending, graphCurrent){
+  if(!pending || !/^graph-user-[0-9a-f]{32}$/.test(pending.event_id || ''))
+    return { state:'failed', reason:'invalid_event' };
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { state:'waiting', reason:'' };
+  const receipt = checked.value.event_receipts[pending.event_id];
+  return receipt && receipt.status === 'applied' && receipt.safe_reason === 'applied'
+    ? { state:'applied', reason:'applied' } : { state:'waiting', reason:'' };
+}
+function validateGraphFailureReceipt(value, eventId){
+  const exact = value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 5
+    && Object.keys(value).every(key => [
+      'byte_size','content_sha256','filename','reason_code','status',
+    ].includes(key));
+  return exact && value.status === 'permanently_invalid'
+    && value.filename === `${eventId}.json` && Number.isInteger(value.byte_size)
+    && value.byte_size >= 0 && value.byte_size <= 256 * 1024
+    && /^[0-9a-f]{64}$/.test(value.content_sha256 || '')
+    && /^[a-z][a-z0-9_]{0,63}$/.test(value.reason_code || '')
+    ? { state:'failed', reason:value.reason_code } : null;
+}
+async function loadGraphFailureReceipt(eventId){
+  try{
+    const response = await gh(`graph/failed/${eventId}.json?ref=${cfg.branch || 'main'}`, { cache:'no-store' });
+    return validateGraphFailureReceipt(JSON.parse(b64decode(response.content)), eventId);
+  }catch(error){ return null; }
+}
 function quarantineEnrichment(entry, reason){
   const safeId = entry && typeof entry.event_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(entry.event_id)
     ? entry.event_id : 'unknown';
@@ -1251,6 +1411,78 @@ function reconcileEnrichmentPending(){
   }
   ls.set(LS.ep, keep);
   ls.set(LS.er, safeResults);
+}
+function quarantineGraph(entry, reason){
+  const eventId = entry && /^graph-user-[0-9a-f]{32}$/.test(entry.event_id || '')
+    ? entry.event_id : 'unknown';
+  const allowed = new Set(['invalid_event','invalid_action','invalid_tag','invalid_connection',
+    'unknown_record','unknown_tag','unknown_connection','duplicate_connection','stale_scope']);
+  const quarantined = ls.get(LS.gx, []);
+  quarantined.push({ event_id:eventId, reason:allowed.has(reason) ? reason : 'invalid_event' });
+  ls.set(LS.gx, quarantined.slice(-100));
+}
+function markGraphPending(payload, transport){
+  const pending = ls.get(LS.gp, {});
+  pending[payload.event_id] = {
+    event_id:payload.event_id, record_id:payload.node_id, action:payload.action,
+    transport:transport === 'offline' ? 'offline' : 'queued',
+  };
+  ls.set(LS.gp, pending);
+  const results = ls.get(LS.gr, {});
+  if(results && typeof results === 'object' && !Array.isArray(results)){
+    delete results[payload.node_id]; ls.set(LS.gr, results);
+  }
+}
+async function flushGraphCommands(loud){
+  const queued = ls.get(LS.gq, []);
+  if(!Array.isArray(queued) || !queued.length) return;
+  const left = [];
+  for(const entry of queued){
+    const checked = canonicalizeQueuedGraphCommand(entry, GRAPH);
+    if(!checked.ok){ quarantineGraph(entry, checked.reason); continue; }
+    try{
+      const payload = await putGraphCommand(checked.value, GRAPH);
+      markGraphPending(payload, 'queued');
+    }catch(error){ left.push(entry); }
+  }
+  ls.set(LS.gq, left);
+  if(loud) toast(left.length ? `${left.length}건 그래프 전송 대기` : '수정 요청 전송', !!left.length);
+}
+function queueGraphCommand(entry){
+  const checked = canonicalizeQueuedGraphCommand(entry, GRAPH);
+  if(!checked.ok){ quarantineGraph(entry, checked.reason); return checked; }
+  const queued = ls.get(LS.gq, []);
+  queued.push(checked.value); ls.set(LS.gq, queued);
+  markGraphPending(checked.value, 'offline');
+  return checked;
+}
+async function submitGraphCommand(action, input){
+  const built = buildGraphCommand(action, input, GRAPH);
+  if(!built.ok) return built;
+  try{
+    const payload = await putGraphCommand(built.value, GRAPH);
+    markGraphPending(payload, 'queued');
+    return { ok:true, value:payload, transport:'queued' };
+  }catch(error){
+    queueGraphCommand(built.value);
+    return { ok:true, value:built.value, transport:'offline' };
+  }
+}
+async function reconcileGraphPending(){
+  const stored = ls.get(LS.gp, {});
+  if(!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+  const keep = {}, results = ls.get(LS.gr, {});
+  const safeResults = results && typeof results === 'object' && !Array.isArray(results) ? results : {};
+  for(const [eventId, pending] of Object.entries(stored)){
+    let result = resolveGraphReceipt({ ...pending, event_id:eventId }, GRAPH);
+    if(result.state === 'waiting') result = await loadGraphFailureReceipt(eventId) || result;
+    if(result.state === 'waiting') keep[eventId] = pending;
+    else if(pending && typeof pending.record_id === 'string') safeResults[pending.record_id] = {
+      event_id:eventId, state:result.state, reason:result.reason,
+    };
+  }
+  ls.set(LS.gp, keep);
+  ls.set(LS.gr, safeResults);
 }
 async function submit(payload, okMsg, uiType = payload.type){
   payload.id = newId();
@@ -1437,16 +1669,26 @@ function enrichmentResultForRecord(recordId){
      || typeof result.reason !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(result.reason)) return '';
   return result.state === 'applied' ? '반영됨' : enrichmentRejectionLabel(result.reason);
 }
+function graphResultForRecord(recordId){
+  const results = ls.get(LS.gr, {}), result = results && results[recordId];
+  if(!result || typeof result !== 'object' || !/^graph-user-[0-9a-f]{32}$/.test(result.event_id || '')
+     || !['applied','failed'].includes(result.state)
+     || typeof result.reason !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(result.reason)) return '';
+  return result.state === 'applied' ? '반영됨' : '반영 실패';
+}
 function enrichmentControlState(record, sidecarState){
   const validId = record && typeof record.record_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(record.record_id);
   const validHash = record && typeof record.source_hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(record.source_hash);
   const validVersion = record && Number.isInteger(record.redaction_version) && record.redaction_version > 0;
-  const enabled = !!(validId && validHash && validVersion && ['loaded','cached'].includes(sidecarState));
   const privacy = record && record.enrichmentStatus === 'privacy_review_required';
+  const currentGraphState = typeof graphLoadState === 'string' ? graphLoadState : 'loaded';
+  const enabled = privacy
+    ? !!(validId && validHash && validVersion && ['loaded','cached'].includes(sidecarState))
+    : !!(validId && record && record.graphCurrent && ['loaded','cached'].includes(currentGraphState));
   return {
     enabled, mode:privacy ? 'privacy' : 'normal',
     actions:privacy ? ['allow_redacted','allow_original','skip_enrichment']
-      : ['add_tag','remove_tag','add_connection','remove_connection'],
+      : ['add_tag','remove_tag','add_link','remove_link'],
     tagSlots:Math.max(0, 3 - (Array.isArray(record && record.displayTags) ? record.displayTags.length : 0)),
     connectionSlots:Math.max(0, 3 - (Array.isArray(record && record.connections) ? record.connections.length : 0)),
   };
@@ -1492,7 +1734,8 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
   const state = enrichmentControlState(record, sidecarState);
   if(!state.enabled) return '';
   const id = record.record_id;
-  const priorResult = enrichmentResultForRecord(id);
+  const priorResult = state.mode === 'privacy'
+    ? enrichmentResultForRecord(id) : (graphResultForRecord(id) || enrichmentResultForRecord(id));
   if(state.mode === 'privacy') return `<section class="enrich-controls" aria-label="개인정보 분석 선택">
     <h4>개인정보가 포함될 수 있습니다</h4><p>원문 전송은 한 번 더 확인합니다.</p>
     <div class="row"><button type="button" class="primary" data-upload-control data-enrich-action="allow_redacted">가린 내용으로 허용</button>
@@ -1500,18 +1743,19 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
     <button type="button" data-upload-control data-enrich-action="skip_enrichment">분석 제외</button></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
   const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
+  const tagFacts = Array.isArray(record.displayTagOrigins) ? record.displayTagOrigins : [];
   const connections = Array.isArray(record.connections) ? record.connections : [];
   const tagDisabled = state.tagSlots === 0;
   const connectionDisabled = state.connectionSlots === 0;
   if(!['completed','retry_wait','failed','skipped'].includes(record.enrichmentStatus)) return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
     <h4>수정</h4><p>태그과 연결은 각각 최대 3개까지 반영 요청할 수 있습니다.</p>
-    ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map(tag =>
-      `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-enrich-tag="${esc(tag)}" aria-label="${esc(tag)} 태그 삭제">×</button></span>`).join('')}</div>` : ''}
+    ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map((tag, index) =>
+      `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-graph-normalized-key="${esc(tagFacts[index] && tagFacts[index].normalized_key || '')}" aria-label="${esc(tag)} 태그 삭제"${tagFacts[index] && tagFacts[index].normalized_key ? '' : ' disabled'}>×</button></span>`).join('')}</div>` : ''}
     <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="80"${tagDisabled ? ' data-limit-disabled disabled' : ''}>
     <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag"${tagDisabled ? ' data-limit-disabled disabled' : ''}>태그 추가</button></div>
     ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map(connection =>
-      `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_connection" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
+      `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_link" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" data-graph-relation="${esc(connection.relation)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
     <label>추천 연결</label><div class="enrich-search-results" data-enrich-recommendations></div>
     <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"${connectionDisabled ? ' data-limit-disabled disabled' : ''}><div class="enrich-search-results" data-enrich-search-results></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
@@ -1519,7 +1763,7 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
 function renderConnectionRecommendations(record, enrichments){
   const candidates = rankConnectionCandidates(record, ALL, enrichments);
   const full = (record.connections || []).length >= 3;
-  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}"${full ? ' data-limit-disabled disabled' : ''}>${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
+  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}"${full ? ' data-limit-disabled disabled' : ''}>${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
 }
 function renderEnrichmentIssue(record){
   const issue = visibleEnrichmentIssue(record);
@@ -1709,13 +1953,18 @@ async function submitCardEnrichment(cardElement, trigger){
     return;
   }
   if(action === 'allow_original' && !window.confirm('원문을 분석 도구에 보내도록 허용할까요?')) return;
-  const input = { event_id:newId(), client_created_at:new Date().toISOString(), record };
-  if(action === 'add_tag') input.tag = cardElement.querySelector('[data-enrich-tag-input]').value;
-  if(action === 'remove_tag') input.tag = trigger.dataset.enrichTag;
-  if(action === 'remove_connection') input.connection = {
-    kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId
+  const graphAction = ['add_tag','remove_tag','add_link','remove_link'].includes(action);
+  const input = {
+    event_id:graphAction ? newGraphEventId() : newId(),
+    client_created_at:new Date().toISOString(), record,
   };
-  if(action === 'add_connection'){
+  if(action === 'add_tag') input.raw_display_value = cardElement.querySelector('[data-enrich-tag-input]').value;
+  if(action === 'remove_tag') input.normalized_key = trigger.dataset.graphNormalizedKey;
+  if(action === 'remove_link') input.connection = {
+    kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId,
+    relation:trigger.dataset.graphRelation,
+  };
+  if(action === 'add_link'){
     if(trigger.dataset.enrichKind && trigger.dataset.enrichTargetId){
       input.connection = { kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId };
     }else{
@@ -1723,12 +1972,16 @@ async function submitCardEnrichment(cardElement, trigger){
       const [kind, targetId] = (selectedControl ? selectedControl.value : '').split(':', 2);
       input.connection = { kind, target_id:targetId };
     }
+    const relations = { record:'related', project:'related_project', daily_note:'previous_note', document:'source_reference' };
+    input.connection.relation = relations[input.connection.kind];
   }
   setEnrichmentUploadState(cardElement, true);
   try{
-    const result = await submitEnrichmentEvent(action, input);
+    const result = graphAction
+      ? await submitGraphCommand(action, input) : await submitEnrichmentEvent(action, input);
     if(feedback) feedback.textContent = result.ok
-      ? (result.transport === 'offline' ? '오프라인 — 전송 대기' : '보강 요청 전송 대기')
+      ? (result.transport === 'offline' ? '오프라인 — 전송 대기'
+        : graphAction ? '수정 요청 반영 대기' : '보강 요청 전송 대기')
       : '요청을 보낼 수 없습니다.';
   }finally{
     setEnrichmentUploadState(cardElement, false);
@@ -1789,7 +2042,7 @@ function bind(el){
         ...Object.entries(projects).map(([target_id, item]) => ({ kind:'project', target_id, label:item.title || target_id, text:item.title || '' })),
       ].filter(item => item.target_id && !(item.kind === 'record' && item.target_id === record.record_id)
         && !used.has(`${item.kind}:${item.target_id}`) && item.text.toLowerCase().includes(query)).slice(0,20);
-      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)} <small>${item.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('');
+      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)} <small>${item.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('');
       results.querySelectorAll('[data-enrich-action]').forEach(button => { button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); }; });
     };
   });
@@ -1932,7 +2185,9 @@ $('reset').onclick = () => {
   renderTypes(); syncFields(); renderRecent(); renderQueue();
   flush(false);
   loadProjects(false);
-  window.addEventListener('online', () => { flush(true); flushEnrichments(true); loadProjects(true); });
+  window.addEventListener('online', () => {
+    flush(true); flushEnrichments(true); flushGraphCommands(true); loadProjects(true);
+  });
 
   // 딥링크: ?m=morning | night | view  (텔레그램 알림이 이 주소로 보냅니다)
   const m = new URLSearchParams(location.search).get('m');
