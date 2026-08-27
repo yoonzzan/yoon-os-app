@@ -76,18 +76,34 @@ const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCur
 const HASH_A = `sha256-${'a'.repeat(64)}`;
 const HASH_B = `sha256-${'b'.repeat(64)}`;
 const fixturePath = resolve(import.meta.dirname, 'projector-sidecar.fixture.json');
-const projectorRoot = process.env.LIFE_OS_ROOT
-  || resolve(import.meta.dirname, '..', '..', 'automatic-record-enrichment');
+function locateProjectorRoot(){
+  if(process.env.LIFE_OS_ROOT) return resolve(process.env.LIFE_OS_ROOT);
+  const repository = resolve(import.meta.dirname, '..', '..', 'yoonzzan-life-os');
+  if(!existsSync(repository)) return repository;
+  try{
+    const worktrees = execFileSync('git', ['-C', repository, 'worktree', 'list', '--porcelain'], {
+      encoding:'utf8',
+    }).trim().split(/\n\n+/).map(block => Object.fromEntries(block.split('\n').map(line => {
+      const split = line.indexOf(' ');
+      return split < 0 ? [line, ''] : [line.slice(0, split), line.slice(split + 1)];
+    })));
+    const cutover = worktrees.find(item => item.branch === 'refs/heads/feat/tag-connection-graph-cutover'
+      && existsSync(resolve(item.worktree || '', 'tests', 'projector_app_fixture.py')));
+    if(cutover) return cutover.worktree;
+  }catch(error){ /* the exact missing-generator assertion below remains authoritative */ }
+  return repository;
+}
+const projectorRoot = locateProjectorRoot();
 function projectCurrentFixture() {
   const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
   const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
-  if(existsSync(generator)){
-    const generated = JSON.parse(execFileSync('python3', [generator], {
-      cwd:projectorRoot, encoding:'utf8',
-    }));
-    assert.deepEqual(generated, checkedIn,
-      'the checked-in app fixture must exactly match the production Python projector output');
-  }
+  assert.ok(existsSync(generator),
+    'the LifeOS projector is required; set LIFE_OS_ROOT when the sibling repository is elsewhere');
+  const generated = JSON.parse(execFileSync('python3', [generator], {
+    cwd:projectorRoot, encoding:'utf8',
+  }));
+  assert.deepEqual(generated, checkedIn,
+    'the checked-in app fixture must exactly match the production Python projector output');
   return checkedIn;
 }
 const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
