@@ -706,13 +706,13 @@ const graphSourceNode = graphCurrent.nodes.find(node => node.node_id === graphSo
 const graphRecord = { record_id:graphSourceId, content_hash:graphSourceNode.content_hash };
 const graphBase = { event_id:GRAPH_EVENT_ID, client_created_at:EVENT_TIME, record:graphRecord };
 const graphAddTag = graphCommandContracts.buildGraphCommand('add_tag', {
-  ...graphBase, raw_display_value:'Straße', injected:'must-not-survive',
+  ...graphBase, raw_display_value:' Straße ', injected:'must-not-survive',
 }, graphCurrent);
 assert.deepEqual(graphAddTag, { ok:true, value:{
   schema_version:1, event_id:GRAPH_EVENT_ID, node_id:graphSourceId,
   action:'add_tag', client_created_at:EVENT_TIME,
-  facts:[{ kind:'tag', raw_display_value:'Straße' }],
-} }, 'the browser sends only a raw tag display and leaves Unicode normalization to Python');
+  facts:[{ kind:'tag', raw_display_value:' Straße ' }],
+} }, 'the browser preserves the raw tag display and leaves Unicode normalization to Python');
 assert.doesNotMatch(JSON.stringify(graphAddTag.value), /normalized_key|content_hash|source_hash|provenance/,
   'an add-tag command must not invent backend-owned normalization, scope, or provenance fields');
 
@@ -748,6 +748,9 @@ assert.equal(graphCommandContracts.buildGraphCommand('add_link', {
 assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
   ...graphBase, event_id:'event-123', raw_display_value:'tag',
 }, graphCurrent).ok, false, 'legacy event IDs cannot enter the graph pending path');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, tag:'legacy tag',
+}, graphCurrent).ok, false, 'the graph builder does not accept the legacy normalized tag input');
 assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
   ...graphBase, record:{ ...graphRecord, content_hash:HASH_B }, raw_display_value:'tag',
 }, graphCurrent).reason, 'stale_scope', 'a command created against stale record content remains local');
@@ -1013,15 +1016,16 @@ assert.equal(flushStore.get('ep', {})['event-123'].transport, 'queued',
 
 const controlStore = makeMemoryStore();
 const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
-  const LS = { er:'er', gr:'gr' };
+  const LS = { er:'er', gr:'gr', gp:'gp' };
   ${namedFunction('privacyDecisionIsCurrent')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('graphResultForRecord')}
+  ${namedFunction('graphPendingForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('connectionCandidates')}
   ${namedFunction('renderEnrichmentControls')}
-  return { privacyDecisionIsCurrent, enrichmentControlState, connectionCandidates, renderEnrichmentControls };
+  return { privacyDecisionIsCurrent, graphPendingForRecord, enrichmentControlState, connectionCandidates, renderEnrichmentControls };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char])), controlStore, STATUS_REASON_LABEL);
@@ -1033,7 +1037,6 @@ const editableRecord = {
 };
 assert.deepEqual(controlContracts.enrichmentControlState(editableRecord, 'loaded'), {
   enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_link','remove_link'],
-  tagSlots:2, connectionSlots:3,
 }, 'a current graph record exposes compact graph correction controls');
 assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, record_id:'' }, 'loaded').enabled, false,
   'a missing record ID must disable every graph action');
@@ -1045,7 +1048,6 @@ assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatib
 const privacyRecord = { ...editableRecord, enrichmentStatus:'privacy_review_required' };
 assert.deepEqual(controlContracts.enrichmentControlState(privacyRecord, 'cached'), {
   enabled:true, mode:'privacy', actions:['allow_redacted','allow_original','skip_enrichment'],
-  tagSlots:2, connectionSlots:3,
 }, 'privacy review exposes exactly the three scope-bound privacy choices from a valid cached sidecar');
 const privacyControls = controlContracts.renderEnrichmentControls(privacyRecord, 'cached', {
   targets:{ records:{ 'rec-b':{ title:'후보 기록' }, 'rec-a':{ title:'현재 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
@@ -1058,6 +1060,21 @@ const pendingControls = controlContracts.renderEnrichmentControls({ ...editableR
   targets:{ records:{}, projects:{} },
 });
 assert.equal(pendingControls, '', 'ordinary correction controls stay hidden until automatic enrichment completes');
+controlStore.set('gp', { [GRAPH_EVENT_ID]:{
+  event_id:GRAPH_EVENT_ID, record_id:'rec-a', action:'add_tag', transport:'offline',
+} });
+const offlinePendingControls = controlContracts.renderEnrichmentControls(editableRecord, 'loaded', {
+  targets:{ records:{}, projects:{} },
+});
+assert.match(offlinePendingControls, /오프라인 — 전송 대기/,
+  'a graph command remains visibly pending after the card is rerendered');
+controlStore.set('gp', { [GRAPH_EVENT_ID]:{
+  event_id:GRAPH_EVENT_ID, record_id:'rec-a', action:'add_tag', transport:'queued',
+} });
+assert.match(controlContracts.renderEnrichmentControls(editableRecord, 'loaded', {
+  targets:{ records:{}, projects:{} },
+}), /수정 요청 반영 대기/, 'a delivered graph command is still pending until its receipt arrives');
+controlStore.set('gp', {});
 controlStore.set('er', { 'rec-a':{
   event_id:'event-future', state:'rejected', reason:'future_safe_reason',
 } });
@@ -1095,10 +1112,18 @@ assert.deepEqual(controlContracts.connectionCandidates(editableRecord, {
   { kind:'project', target_id:'project-a', label:'생활 OS' },
 ], 'connection controls must offer only sidecar catalog candidates and never the current record');
 
-const tagLimitControls = controlContracts.renderEnrichmentControls({
-  ...editableRecord, displayTags:['하나','둘','셋'],
+const manyTagControls = controlContracts.renderEnrichmentControls({
+  ...editableRecord, displayTags:['하나','둘','셋','넷'],
 }, 'loaded', { targets:{ records:{}, projects:{} } });
-assert.match(tagLimitControls, /data-enrich-add-tag[^>]*disabled/, 'adding tags is disabled after three projected tags');
+assert.doesNotMatch(manyTagControls, /data-enrich-add-tag[^>]*disabled|최대 3개/,
+  'the former enrichment quality cap does not block graph tag corrections');
+const manyConnectionControls = controlContracts.renderEnrichmentControls({
+  ...editableRecord, connections:[1,2,3,4].map(index => ({
+    kind:'record', target_id:`rec-${index}`, relation:'related',
+  })),
+}, 'loaded', { targets:{ records:{}, projects:{} } });
+assert.doesNotMatch(manyConnectionControls, /data-enrich-connection-search[^>]*disabled|최대 3개/,
+  'the former enrichment quality cap does not block graph link corrections');
 
 const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASON_LABEL', 'enrichmentLoadState', 'ENRICH', 'ls', 'LS', `
   ${namedFunction('statusLabel')}
@@ -1106,6 +1131,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('graphResultForRecord')}
+  ${namedFunction('graphPendingForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('visibleEnrichmentIssue')}
   ${namedFunction('renderEnrichmentIssue')}
@@ -1120,7 +1146,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   return { visibleEnrichmentIssue, renderEnrichmentIssue, rankConnectionCandidates, renderRecordMetadata, renderEnrichmentEditor, card };
 `)(value => String(value).replace(/[&<>\"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;',
-}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er', gr:'gr' });
+}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er', gr:'gr', gp:'gp' });
 
 for(const status of ['completed', 'pending', 'skipped']){
   const rendered = cardContracts.card({ ...editableRecord, type:'memo', body:'정상 본문', date:'2026-08-24',

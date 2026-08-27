@@ -1250,7 +1250,7 @@ function canonicalizeQueuedGraphCommand(entry, graphCurrent){
   const fact = entry.facts[0];
   if(entry.action === 'add_tag'){
     if(!exactKeys(fact, ['kind','raw_display_value']) || fact.kind !== 'tag'
-       || !safeText(fact.raw_display_value, 256)) return fail('invalid_tag');
+       || !safeText(fact.raw_display_value, 256) || !fact.raw_display_value.trim()) return fail('invalid_tag');
     return { ok:true, value:{ ...entry, facts:[{
       kind:'tag', raw_display_value:fact.raw_display_value,
     }] } };
@@ -1287,7 +1287,7 @@ function buildGraphCommand(action, input, graphCurrent){
   };
   if(action === 'add_tag'){
     const raw = typeof input.raw_display_value === 'string'
-      ? input.raw_display_value.trim() : typeof input.tag === 'string' ? input.tag.trim() : '';
+      ? input.raw_display_value : '';
     base.facts = [{ kind:'tag', raw_display_value:raw }];
   }else if(action === 'remove_tag'){
     base.facts = [{ kind:'tag', normalized_key:input.normalized_key }];
@@ -1676,6 +1676,20 @@ function graphResultForRecord(recordId){
      || typeof result.reason !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(result.reason)) return '';
   return result.state === 'applied' ? '반영됨' : '반영 실패';
 }
+function graphPendingForRecord(recordId){
+  const pending = ls.get(LS.gp, {});
+  if(!pending || typeof pending !== 'object' || Array.isArray(pending)) return '';
+  let queued = false;
+  for(const [eventId, item] of Object.entries(pending)){
+    if(!/^graph-user-[0-9a-f]{32}$/.test(eventId) || !item || typeof item !== 'object'
+       || Array.isArray(item) || item.event_id !== eventId || item.record_id !== recordId
+       || !['add_tag','remove_tag','add_link','remove_link'].includes(item.action)
+       || !['queued','offline'].includes(item.transport)) continue;
+    if(item.transport === 'offline') return '오프라인 — 전송 대기';
+    queued = true;
+  }
+  return queued ? '수정 요청 반영 대기' : '';
+}
 function enrichmentControlState(record, sidecarState){
   const validId = record && typeof record.record_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(record.record_id);
   const validHash = record && typeof record.source_hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(record.source_hash);
@@ -1689,8 +1703,6 @@ function enrichmentControlState(record, sidecarState){
     enabled, mode:privacy ? 'privacy' : 'normal',
     actions:privacy ? ['allow_redacted','allow_original','skip_enrichment']
       : ['add_tag','remove_tag','add_link','remove_link'],
-    tagSlots:Math.max(0, 3 - (Array.isArray(record && record.displayTags) ? record.displayTags.length : 0)),
-    connectionSlots:Math.max(0, 3 - (Array.isArray(record && record.connections) ? record.connections.length : 0)),
   };
 }
 function recordTokenSet(record){
@@ -1735,7 +1747,8 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
   if(!state.enabled) return '';
   const id = record.record_id;
   const priorResult = state.mode === 'privacy'
-    ? enrichmentResultForRecord(id) : (graphResultForRecord(id) || enrichmentResultForRecord(id));
+    ? enrichmentResultForRecord(id)
+    : (graphPendingForRecord(id) || graphResultForRecord(id) || enrichmentResultForRecord(id));
   if(state.mode === 'privacy') return `<section class="enrich-controls" aria-label="개인정보 분석 선택">
     <h4>개인정보가 포함될 수 있습니다</h4><p>원문 전송은 한 번 더 확인합니다.</p>
     <div class="row"><button type="button" class="primary" data-upload-control data-enrich-action="allow_redacted">가린 내용으로 허용</button>
@@ -1745,25 +1758,22 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
   const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
   const tagFacts = Array.isArray(record.displayTagOrigins) ? record.displayTagOrigins : [];
   const connections = Array.isArray(record.connections) ? record.connections : [];
-  const tagDisabled = state.tagSlots === 0;
-  const connectionDisabled = state.connectionSlots === 0;
   if(!['completed','retry_wait','failed','skipped'].includes(record.enrichmentStatus)) return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
-    <h4>수정</h4><p>태그과 연결은 각각 최대 3개까지 반영 요청할 수 있습니다.</p>
+    <h4>수정</h4><p>태그와 연결 수정은 반영이 확인될 때까지 대기 상태로 표시됩니다.</p>
     ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map((tag, index) =>
       `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-graph-normalized-key="${esc(tagFacts[index] && tagFacts[index].normalized_key || '')}" aria-label="${esc(tag)} 태그 삭제"${tagFacts[index] && tagFacts[index].normalized_key ? '' : ' disabled'}>×</button></span>`).join('')}</div>` : ''}
-    <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="80"${tagDisabled ? ' data-limit-disabled disabled' : ''}>
-    <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag"${tagDisabled ? ' data-limit-disabled disabled' : ''}>태그 추가</button></div>
+    <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="256">
+    <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag">태그 추가</button></div>
     ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map(connection =>
       `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_link" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" data-graph-relation="${esc(connection.relation)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
     <label>추천 연결</label><div class="enrich-search-results" data-enrich-recommendations></div>
-    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"${connectionDisabled ? ' data-limit-disabled disabled' : ''}><div class="enrich-search-results" data-enrich-search-results></div>
+    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"><div class="enrich-search-results" data-enrich-search-results></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
 }
 function renderConnectionRecommendations(record, enrichments){
   const candidates = rankConnectionCandidates(record, ALL, enrichments);
-  const full = (record.connections || []).length >= 3;
-  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}"${full ? ' data-limit-disabled disabled' : ''}>${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
+  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}">${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
 }
 function renderEnrichmentIssue(record){
   const issue = visibleEnrichmentIssue(record);
