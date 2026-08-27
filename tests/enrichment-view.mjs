@@ -64,28 +64,46 @@ function assignedLiteral(name) {
   assert.fail(`${name} literal must be balanced`);
 }
 
-const { composeRecords, validateEnrichments } = new Function(`
+const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent } = new Function(`
   ${namedFunction('normalizeEnrichmentTag')}
   ${namedFunction('validateEnrichments')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('composeGraphFacts')}
   ${namedFunction('composeRecords')}
-  return { composeRecords, validateEnrichments };
+  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent };
 `)();
 
 const HASH_A = `sha256-${'a'.repeat(64)}`;
 const HASH_B = `sha256-${'b'.repeat(64)}`;
 const fixturePath = resolve(import.meta.dirname, 'projector-sidecar.fixture.json');
-const projectorRoot = process.env.LIFE_OS_ROOT
-  || resolve(import.meta.dirname, '..', '..', 'automatic-record-enrichment');
+function locateProjectorRoot(){
+  if(process.env.LIFE_OS_ROOT) return resolve(process.env.LIFE_OS_ROOT);
+  const repository = resolve(import.meta.dirname, '..', '..', 'yoonzzan-life-os');
+  if(!existsSync(repository)) return repository;
+  try{
+    const worktrees = execFileSync('git', ['-C', repository, 'worktree', 'list', '--porcelain'], {
+      encoding:'utf8',
+    }).trim().split(/\n\n+/).map(block => Object.fromEntries(block.split('\n').map(line => {
+      const split = line.indexOf(' ');
+      return split < 0 ? [line, ''] : [line.slice(0, split), line.slice(split + 1)];
+    })));
+    const cutover = worktrees.find(item => item.branch === 'refs/heads/feat/tag-connection-graph-cutover'
+      && existsSync(resolve(item.worktree || '', 'tests', 'projector_app_fixture.py')));
+    if(cutover) return cutover.worktree;
+  }catch(error){ /* the exact missing-generator assertion below remains authoritative */ }
+  return repository;
+}
+const projectorRoot = locateProjectorRoot();
 function projectCurrentFixture() {
   const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
   const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
-  if(existsSync(generator)){
-    const generated = JSON.parse(execFileSync('python3', [generator], {
-      cwd:projectorRoot, encoding:'utf8',
-    }));
-    assert.deepEqual(generated, checkedIn,
-      'the checked-in app fixture must match the canonical Python projector output');
-  }
+  assert.ok(existsSync(generator),
+    'the LifeOS projector is required; set LIFE_OS_ROOT when the sibling repository is elsewhere');
+  const generated = JSON.parse(execFileSync('python3', [generator], {
+    cwd:projectorRoot, encoding:'utf8',
+  }));
+  assert.deepEqual(generated, checkedIn,
+    'the checked-in app fixture must exactly match the production Python projector output');
   return checkedIn;
 }
 const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
@@ -97,17 +115,284 @@ const sidecar = { schema_version: 1, records: {
 } };
 
 assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
+const sourceScopedPrivacy = structuredClone(sidecar);
+sourceScopedPrivacy.records['rec-a'].privacy_decision = {
+  action:'allow_redacted', source_hash:HASH_A, redaction_version:1,
+};
+assert.equal(validateEnrichments(sourceScopedPrivacy).ok, true,
+  'a source-scoped privacy decision matching the projected source hash must validate');
+const contentScopedPrivacy = structuredClone(sidecar);
+contentScopedPrivacy.records['rec-a'].content_hash = HASH_B;
+contentScopedPrivacy.records['rec-a'].privacy_decision = {
+  action:'allow_original', content_hash:HASH_B, redaction_version:1,
+};
+assert.equal(validateEnrichments(contentScopedPrivacy).ok, true,
+  'a content-scoped privacy decision matching the projected content hash must validate');
+const staleSourceScopedPrivacy = structuredClone(sourceScopedPrivacy);
+staleSourceScopedPrivacy.records['rec-a'].privacy_decision.source_hash = HASH_B;
+assert.equal(validateEnrichments(staleSourceScopedPrivacy).ok, false,
+  'a source-scoped privacy decision must expire when its projected source hash changes');
+const staleContentScopedPrivacy = structuredClone(contentScopedPrivacy);
+staleContentScopedPrivacy.records['rec-a'].privacy_decision.content_hash = HASH_A;
+assert.equal(validateEnrichments(staleContentScopedPrivacy).ok, false,
+  'a content-scoped privacy decision must expire when its projected content hash changes');
+for(const malformedPrivacyDecision of [
+  { action:'allow_original', redaction_version:1 },
+  { action:'allow_original', source_hash:HASH_A, content_hash:HASH_B, redaction_version:1 },
+]){
+  const malformedPrivacy = structuredClone(contentScopedPrivacy);
+  malformedPrivacy.records['rec-a'].privacy_decision = malformedPrivacyDecision;
+  assert.equal(validateEnrichments(malformedPrivacy).ok, false,
+    'a privacy decision must contain exactly one canonical scope hash');
+}
 const canonicalProjection = projectCurrentFixture();
-assert.equal(validateEnrichments(canonicalProjection).ok, true,
+const canonicalEnrichment = canonicalProjection.enrichment_current || canonicalProjection;
+assert.ok(canonicalProjection.graph_current,
+  'the checked-in fixture must contain graph_current so graph cutover coverage never skips');
+assert.equal(validateEnrichments(canonicalEnrichment).ok, true,
   'the strict browser validator must accept the canonical project_current output');
 assert.deepEqual(composeRecords([
   { record_id:'rec-a', source_hash:HASH_A, tags:['Source Tag'], body:'본문' },
-], canonicalProjection)[0].displayTags, ['수동', '자동분류'],
+], canonicalEnrichment)[0].displayTags, ['수동', '자동분류'],
   'the actual projector fixture must feed the browser composition without a copied contract');
-const canonicalWithExtraTargetField = structuredClone(canonicalProjection);
+const canonicalWithExtraTargetField = structuredClone(canonicalEnrichment);
 canonicalWithExtraTargetField.targets.records['rec-a'].unexpected = 'must-not-pass';
 assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   'target catalog entries must reject fields outside the reduced projector contract');
+
+{
+  const graphCurrent = canonicalProjection.graph_current;
+  const graphNodes = Object.fromEntries(graphCurrent.nodes.map(node => [node.node_id, node]));
+  const scenarioRecord = (name, overrides = {}) => {
+    const recordId = canonicalProjection.scenarios[name].record_id;
+    const node = graphNodes[recordId];
+    const status = canonicalProjection.enrichment_current.records[recordId];
+    return {
+      record_id:recordId, source_hash:status.source_hash, content_hash:node.content_hash,
+      tags:['legacy fallback tag'], connections:[{ kind:'record', target_id:'rec-a' }], body:'fixture record',
+      ...overrides,
+    };
+  };
+  const graphFacts = composeGraphFacts(graphCurrent);
+  assert.equal(validateGraphCurrent(graphCurrent).ok, true,
+    'the actual Python graph projector output must satisfy the browser graph contract');
+  const casefoldGraph = structuredClone(graphCurrent);
+  const casefoldTag = casefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  casefoldTag.normalized_key = 'strasse';
+  casefoldTag.raw_display_value = 'Straße';
+  const casefoldTagNode = casefoldGraph.nodes.find(node => node.node_id === casefoldTag.target_id);
+  casefoldTagNode.metadata = { normalized_key:'strasse', raw_display_value:'Straße' };
+  assert.equal(validateGraphCurrent(casefoldGraph).ok, true,
+    'a valid Python-casefolded tag key must not be rejected by JavaScript lowercasing');
+  assert.deepEqual(composeGraphFacts(casefoldGraph).records[scenarioRecord('source_only').record_id].tags,
+    [{ value:'Straße', normalized_key:'strasse', origin:'source' }],
+    'a casefolded graph tag retains its projector-provided raw display value');
+  const cherokeeCasefoldGraph = structuredClone(graphCurrent);
+  const cherokeeTag = cherokeeCasefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  cherokeeTag.normalized_key = 'Ꭰ';
+  cherokeeTag.raw_display_value = 'ꭰ';
+  cherokeeCasefoldGraph.nodes.find(node => node.node_id === cherokeeTag.target_id)
+    .metadata = { normalized_key:'Ꭰ', raw_display_value:'ꭰ' };
+  assert.equal(validateGraphCurrent(cherokeeCasefoldGraph).ok, true,
+    'a valid Python-casefolded Cherokee key must not be reinterpreted with JavaScript lowercasing');
+  const greekCasefoldGraph = structuredClone(graphCurrent);
+  const greekTag = greekCasefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  greekTag.normalized_key = 'ΐ';
+  greekTag.raw_display_value = 'ΐ';
+  greekCasefoldGraph.nodes.find(node => node.node_id === greekTag.target_id)
+    .metadata = { normalized_key:'ΐ', raw_display_value:'ΐ' };
+  assert.equal(validateGraphCurrent(greekCasefoldGraph).ok, true,
+    'a valid post-casefold decomposed Greek key must not be NFKC-normalized by the browser');
+  const astralKey = '😀'.repeat(80);
+  const astralBoundaryGraph = structuredClone(graphCurrent);
+  const astralTag = astralBoundaryGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  astralTag.normalized_key = astralKey;
+  astralTag.raw_display_value = astralKey;
+  astralBoundaryGraph.nodes.find(node => node.node_id === astralTag.target_id)
+    .metadata = { normalized_key:astralKey, raw_display_value:astralKey };
+  assert.equal(validateGraphCurrent(astralBoundaryGraph).ok, true,
+    '80 astral Unicode code points are accepted even though they occupy 160 UTF-16 units');
+  const longRawDisplay = '#'.repeat(100) + '😀'.repeat(80);
+  const longRawDisplayGraph = structuredClone(graphCurrent);
+  const longRawDisplayTag = longRawDisplayGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  longRawDisplayTag.normalized_key = '😀'.repeat(80);
+  longRawDisplayTag.raw_display_value = longRawDisplay;
+  longRawDisplayGraph.nodes.find(node => node.node_id === longRawDisplayTag.target_id)
+    .metadata = { normalized_key:'😀'.repeat(80), raw_display_value:longRawDisplay };
+  assert.equal(validateGraphCurrent(longRawDisplayGraph).ok, true,
+    'a production-valid 180-code-point raw display is accepted despite 260 UTF-16 units');
+  const overlongRawDisplay = structuredClone(longRawDisplayGraph);
+  const overlongRawDisplayTag = overlongRawDisplay.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  overlongRawDisplayTag.raw_display_value = '#'.repeat(177) + '😀'.repeat(80);
+  overlongRawDisplay.nodes.find(node => node.node_id === overlongRawDisplayTag.target_id)
+    .metadata.raw_display_value = '#'.repeat(177) + '😀'.repeat(80);
+  assert.equal(validateGraphCurrent(overlongRawDisplay).ok, false,
+    '257 Unicode code points remain above the canonical raw-display limit');
+  const overlongAstralKey = structuredClone(astralBoundaryGraph);
+  const overlongAstralTag = overlongAstralKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  overlongAstralTag.normalized_key = '😀'.repeat(81);
+  overlongAstralKey.nodes.find(node => node.node_id === overlongAstralTag.target_id)
+    .metadata.normalized_key = '😀'.repeat(81);
+  assert.equal(validateGraphCurrent(overlongAstralKey).ok, false,
+    '81 Unicode code points remain above the canonical tag-key limit');
+  const controlCharacterKey = structuredClone(greekCasefoldGraph);
+  const controlCharacterTag = controlCharacterKey.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  controlCharacterTag.normalized_key = 'bad\u0000key';
+  controlCharacterKey.nodes.find(node => node.node_id === controlCharacterTag.target_id)
+    .metadata.normalized_key = 'bad\u0000key';
+  assert.equal(validateGraphCurrent(controlCharacterKey).ok, false,
+    'a control character in the producer key remains rejected');
+  const malformedTagMetadata = structuredClone(casefoldGraph);
+  malformedTagMetadata.nodes.find(node => node.node_id === casefoldTag.target_id)
+    .metadata.raw_display_value = 'bad\u0000metadata';
+  assert.equal(validateGraphCurrent(malformedTagMetadata).ok, false,
+    'malformed tag metadata remains rejected even when raw-to-key recomputation is not used');
+  const mismatchedTagMembership = structuredClone(casefoldGraph);
+  mismatchedTagMembership.nodes.find(node => node.node_id === casefoldTag.target_id)
+    .metadata.normalized_key = 'different-tag';
+  assert.equal(validateGraphCurrent(mismatchedTagMembership).ok, false,
+    'a tag fact must belong to a tag node with the same canonical projector key');
+  assert.deepEqual(graphFacts.records[canonicalProjection.scenarios.source_only.record_id].tags.map(tag => tag.value), ['source only'],
+    'graph source facts are projected without copying fixture JSON into JavaScript');
+  const boundaryGraph = structuredClone(graphCurrent);
+  const sourceTag = boundaryGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  sourceTag.source_locator = 'a'.repeat(1024);
+  assert.equal(validateGraphCurrent(boundaryGraph).ok, true,
+    'the canonical 1024-character source_locator boundary is accepted');
+  sourceTag.source_locator += 'a';
+  assert.equal(validateGraphCurrent(boundaryGraph).ok, false,
+    'source_locator values above the canonical 1024-character boundary are rejected');
+  const astralSourceLocatorGraph = structuredClone(graphCurrent);
+  const astralSourceTag = astralSourceLocatorGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
+  astralSourceTag.source_locator = '😀'.repeat(1024);
+  assert.equal(validateGraphCurrent(astralSourceLocatorGraph).ok, true,
+    'a 1024-code-point astral source locator is accepted despite 2048 UTF-16 units');
+  astralSourceTag.source_locator += '😀';
+  assert.equal(validateGraphCurrent(astralSourceLocatorGraph).ok, false,
+    'a 1025-code-point astral source locator remains above the canonical boundary');
+  const multilineGraph = structuredClone(graphCurrent);
+  const typedLink = multilineGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0];
+  const multilinePrefix = '첫 줄\n\t둘째 줄 ';
+  typedLink.raw_text = `${multilinePrefix}${'x'.repeat(4096 - multilinePrefix.length)}`;
+  assert.equal(validateGraphCurrent(multilineGraph).ok, true,
+    'a link raw_text accepts canonical multiline tab/newline content through 4096 characters');
+  typedLink.raw_text += 'x';
+  assert.equal(validateGraphCurrent(multilineGraph).ok, false,
+    'link raw_text above the canonical 4096-character boundary is rejected');
+  const astralRawTextGraph = structuredClone(graphCurrent);
+  const astralTypedLink = astralRawTextGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0];
+  astralTypedLink.raw_text = '😀'.repeat(4000);
+  assert.equal(validateGraphCurrent(astralRawTextGraph).ok, true,
+    'a 4000-code-point astral link raw_text is accepted despite 8000 UTF-16 units');
+  astralTypedLink.raw_text += '😀'.repeat(97);
+  assert.equal(validateGraphCurrent(astralRawTextGraph).ok, false,
+    'a 4097-code-point astral link raw_text remains above the canonical boundary');
+  const lineSeparatorGraph = structuredClone(graphCurrent);
+  lineSeparatorGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0].raw_text = '첫 줄\u2028둘째 줄';
+  assert.equal(validateGraphCurrent(lineSeparatorGraph).ok, true,
+    'multiline raw_text accepts every separator the production projector permits');
+  const controlGraph = structuredClone(graphCurrent);
+  controlGraph.nodes.find(node => node.node_id === scenarioRecord('typed_links').record_id).links[0].raw_text = 'bad\u0000control';
+  assert.equal(validateGraphCurrent(controlGraph).ok, false,
+    'a production-rejected control character invalidates graph current');
+  assert.deepEqual(composeRecords([scenarioRecord('source_only')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['source only'], 'a current graph node is the primary source of source tags');
+  assert.deepEqual(composeRecords([scenarioRecord('auto_only')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['auto only'], 'a current graph node is the primary source of auto tags');
+  assert.deepEqual(composeRecords([scenarioRecord('mixed')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    ['mixed auto', 'mixed source'], 'source and auto graph facts compose together');
+  assert.deepEqual(composeRecords([scenarioRecord('user_remove')], canonicalProjection.enrichment_current, graphCurrent)[0].displayTags,
+    [], 'an empty graph node preserves a user removal');
+  const typed = composeRecords([scenarioRecord('typed_links')], canonicalProjection.enrichment_current, graphCurrent)[0];
+  assert.deepEqual(typed.connections.map(link => link.kind).sort(), ['daily_note', 'project', 'record'],
+    'graph link targets retain their validated node kinds');
+  const knownEmpty = composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, graphCurrent)[0];
+  assert.deepEqual(knownEmpty.displayTags, [],
+    'a known-empty graph node must never re-merge legacy enrichment or raw tags');
+  assert.deepEqual(knownEmpty.connections, [],
+    'a known-empty graph node must never re-merge legacy enrichment links');
+  assert.equal(knownEmpty.enrichmentStatus, 'completed',
+    'enrichment current remains the sole source of processing status');
+  const primaryMatrix = [
+    ['source_only', scenarioRecord('source_only'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['auto_only', scenarioRecord('auto_only'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['mixed', scenarioRecord('mixed'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['user_remove', scenarioRecord('user_remove'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['typed_links', scenarioRecord('typed_links'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['known_empty', scenarioRecord('known_empty'), canonicalProjection.enrichment_current, graphCurrent, 'completed'],
+    ['source_hash_only_change', {
+      ...canonicalProjection.scenarios.source_hash_only_change.changed_record, body:'fixture record',
+    }, canonicalProjection.scenarios.source_hash_only_change.enrichment_current,
+    canonicalProjection.scenarios.source_hash_only_change.graph_current, 'completed'],
+    ['content_hash_change', {
+      ...canonicalProjection.scenarios.content_hash_change.changed_record, body:'fixture record',
+    }, canonicalProjection.scenarios.content_hash_change.enrichment_current,
+    canonicalProjection.scenarios.content_hash_change.graph_current, 'pending'],
+  ];
+  assert.deepEqual(primaryMatrix.map(([name, record, enrichment, graph, status]) => {
+    const composed = composeRecords([record], enrichment, graph)[0];
+    return [name, composed.record_id === record.record_id, composed.graphCurrent, composed.enrichmentStatus];
+  }), primaryMatrix.map(([name,,,, status]) => [name, true, true, status]),
+  'the app consumes every supported Python fixture scenario through graph-primary composition');
+  const runtimeCompose = new Function('DATA', 'ENRICH', 'GRAPH', `
+    let ALL = [];
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('composeGraphFacts')}
+    ${namedFunction('composeRecords')}
+    ${namedFunction('graphTargetCatalog')}
+    ${namedFunction('recordDate')}
+    ${namedFunction('recordSavedAt')}
+    ${namedFunction('resolveConnection')}
+    ${namedFunction('resolveConnections')}
+    ${namedFunction('prepData')}
+    prepData();
+    return structuredClone(ALL);
+  `)({ records:[scenarioRecord('known_empty'), scenarioRecord('typed_links'), scenarioRecord('source_only', {
+    body:'연결된 기록 본문',
+  })] }, canonicalProjection.enrichment_current, graphCurrent);
+  const runtimeKnownEmpty = runtimeCompose.find(record => record.record_id === scenarioRecord('known_empty').record_id);
+  const runtimeTyped = runtimeCompose.find(record => record.record_id === scenarioRecord('typed_links').record_id);
+  assert.deepEqual(runtimeKnownEmpty.displayTags, [],
+    'prepData must pass GRAPH into runtime composition so known-empty facts stay empty');
+  assert.deepEqual(runtimeKnownEmpty.connections, [],
+    'runtime prepData must not re-merge legacy connections for a known-empty graph node');
+  assert.deepEqual(runtimeTyped.relatedItems.map(item => [item.kind, item.label]), [
+    ['daily_note', '[하루 기록] 2026-08-23'],
+    ['project', '[프로젝트] synthetic graph project'],
+    ['record', '[기록] 연결된 기록 본문'],
+  ], 'runtime composition resolves the Python typed-link fixture through safe app labels');
+  const tombstoned = structuredClone(graphCurrent);
+  tombstoned.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).deleted = true;
+  const deletedKnownEmpty = composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, tombstoned)[0];
+  assert.deepEqual(deletedKnownEmpty.displayTags, [],
+    'a known tombstone record node suppresses legacy tags instead of falling back');
+  assert.deepEqual(deletedKnownEmpty.connections, [],
+    'a known tombstone record node suppresses legacy links instead of falling back');
+
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, null)[0].displayTags,
+    ['legacy fallback tag'], 'only an absent graph permits legacy facts');
+  const unsupported = canonicalProjection.scenarios.incompatible_schema.graph_current;
+  assert.equal(validateGraphCurrent(unsupported).ok, false, 'an unsupported graph schema is explicitly incompatible');
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, unsupported)[0].displayTags,
+    ['legacy fallback tag'], 'an unsupported graph schema falls back to legacy facts');
+  const contentMismatch = structuredClone(graphCurrent);
+  contentMismatch.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).content_hash = HASH_B;
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, contentMismatch)[0].displayTags,
+    ['legacy fallback tag'], 'a graph content-hash mismatch falls back to legacy facts');
+  const recordMismatch = structuredClone(graphCurrent);
+  recordMismatch.nodes.find(node => node.node_id === scenarioRecord('known_empty').record_id).node_id = 'rec-mismatch';
+  assert.deepEqual(composeRecords([scenarioRecord('known_empty')], canonicalProjection.enrichment_current, recordMismatch)[0].displayTags,
+    ['legacy fallback tag'], 'a missing matching graph record falls back to legacy facts');
+  const sourceHashChanged = canonicalProjection.scenarios.source_hash_only_change;
+  const sourceHashRecord = { ...sourceHashChanged.changed_record, tags:['legacy fallback tag'], body:'fixture record' };
+  assert.deepEqual(composeRecords([sourceHashRecord], sourceHashChanged.enrichment_current, sourceHashChanged.graph_current)[0].displayTags,
+    ['source hash stable'], 'a source-hash-only change retains content-scoped graph facts');
+  const contentHashChanged = canonicalProjection.scenarios.content_hash_change;
+  const contentHashRecord = { ...contentHashChanged.changed_record, tags:['legacy fallback tag'], body:'fixture record' };
+  assert.deepEqual(composeRecords([contentHashRecord], contentHashChanged.enrichment_current, contentHashChanged.graph_current)[0].displayTags,
+    [], 'a changed content hash uses the current known-empty graph node rather than legacy facts');
+}
 assert.deepEqual(composeRecords(
   [{ record_id: 'rec-a', source_hash: 'sha256-a', tags: ['수동'] }],
   { schema_version: 1, records: { 'rec-a': {
@@ -196,6 +481,51 @@ const invalidBase64WithCache = await makeSidecarLoader(
 )();
 assert.equal(invalidBase64WithCache.enrichmentLoadState, 'incompatible',
   'a base64 decode failure must not fall back to a stale cached projection');
+
+function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', branch:'main' }, decode = text => text) {
+  return new Function('gh', 'b64decode', 'ls', 'cfg', `
+    let GRAPH = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
+    let graphLoadState = 'unavailable';
+    ${namedFunction('normalizeEnrichmentTag')}
+    ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('graphCacheKeys')}
+    async function reconcileGraphPending() {}
+    ${namedFunction('loadGraphCurrent')}
+    return async () => { await loadGraphCurrent(); return { GRAPH, graphLoadState }; };
+  `)(gh, decode, {
+    get: (key, fallback) => cache.get(key) ?? fallback,
+    set: (key, value) => cache.set(key, value),
+  }, config);
+}
+
+{
+  const defaultGraphConfig = { owner:'owner-a', repo:'repo-a', branch:'main' };
+  const defaultGraphKeys = new Function('cfg', `${namedFunction('graphCacheKeys')} return graphCacheKeys(cfg);`)(defaultGraphConfig);
+  const graphCache = new Map([[defaultGraphKeys.current, canonicalProjection.graph_current]]);
+  const cachedGraph = await makeGraphLoader(async () => { throw new Error('offline'); }, graphCache)();
+  assert.equal(cachedGraph.graphLoadState, 'cached',
+    'a remote graph failure reports an explicit cached state without breaking records');
+  assert.equal(cachedGraph.GRAPH.nodes.length, canonicalProjection.graph_current.nodes.length,
+    'a validated cached graph remains available for graph-primary composition');
+  const incompatibleGraph = await makeGraphLoader(
+    async () => ({ content:JSON.stringify(canonicalProjection.scenarios.incompatible_schema.graph_current) }), graphCache
+  )();
+  assert.equal(incompatibleGraph.graphLoadState, 'incompatible',
+    'an unsupported remote graph schema is never masked by a stale graph cache');
+  const unavailableGraph = await makeGraphLoader(async () => { throw new Error('missing'); }, new Map())();
+  assert.equal(unavailableGraph.graphLoadState, 'unavailable',
+    'a missing graph has an explicit fallback state rather than failing the whole app');
+  const firstConfig = defaultGraphConfig;
+  const switchedConfig = { owner:'owner-b', repo:'repo-b', branch:'main' };
+  const firstKeys = new Function('cfg', `${namedFunction('graphCacheKeys')} return graphCacheKeys(cfg);`)(firstConfig);
+  const switchedKeys = new Function('cfg', `${namedFunction('graphCacheKeys')} return graphCacheKeys(cfg);`)(switchedConfig);
+  assert.notDeepEqual(firstKeys, switchedKeys,
+    'graph cache, ETag, and timestamp keys must be namespaced by repository and branch');
+  const switchedStore = new Map([[firstKeys.current, canonicalProjection.graph_current]]);
+  const switchedGraph = await makeGraphLoader(async () => { throw new Error('offline'); }, switchedStore, switchedConfig)();
+  assert.equal(switchedGraph.graphLoadState, 'unavailable',
+    'switching repository configuration must not reuse the previous repository graph cache');
+}
 
 function makeReceiptSidecarLoader(gh, seed, decode = text => text) {
   return new Function('gh', 'b64decode', 'seed', 'cfg', `
@@ -307,13 +637,17 @@ const viewContracts = new Function('esc', `
   ${namedFunction('enrichmentResultForRecord')}
   ${namedFunction('statusReasonLabel')}
   ${namedFunction('enrichmentWarning')}
+  ${namedFunction('graphWarning')}
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('resolveConnection')}
   ${namedFunction('resolveConnections')}
   ${namedFunction('recordSearchText')}
   ${namedFunction('toggleCardDetails')}
   ${namedFunction('renderProvenance')}
   return {
-    statusLabel, statusReasonLabel, enrichmentWarning, resolveConnection, resolveConnections,
+    statusLabel, statusReasonLabel, enrichmentWarning, graphWarning, graphTargetCatalog, resolveConnection, resolveConnections,
     recordSearchText, toggleCardDetails, renderProvenance
   };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
@@ -339,26 +673,41 @@ assert.equal(viewContracts.enrichmentWarning('cached'), '자동 분석 상태가
 for (const state of ['unavailable', 'incompatible']) {
   assert.equal(viewContracts.enrichmentWarning(state), '자동 분석 상태를 불러오지 못함',
     `${state} sidecar state must leave raw records viewable with a warning`);
+  assert.equal(viewContracts.graphWarning(state), '태그·연결 정보를 불러오지 못해 이전 정보로 표시 중',
+    `${state} graph state must remain explicit while the app uses legacy facts`);
 }
+assert.equal(viewContracts.graphWarning('cached'), '태그·연결 정보가 최신이 아닐 수 있음',
+  'a cached graph state remains visible to the reader');
 
+const typedScenarioForView = canonicalProjection.scenarios.typed_links;
 const connectionRecords = [
-  { record_id: 'rec-a', body: '원본 연결 제목' },
-  { record_id: 'rec-b', body: '연결된 기록 본문' },
+  { record_id: typedScenarioForView.record_id, body: '원본 연결 제목' },
+  { record_id: typedScenarioForView.target_ids.record, body: '연결된 기록 본문' },
 ];
-const projects = { 'project-a': { title: '생활 OS' } };
+const projects = { [typedScenarioForView.target_ids.project]: { title: '생활 OS' } };
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'record', target_id: 'rec-b', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
-  connectionRecords, projects,
-), { label: '연결된 기록 본문', href: '#record-rec-b' },
+  { kind: 'record', target_id: typedScenarioForView.target_ids.record, origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'record', label:'[기록] 연결된 기록 본문', href:`#record-${typedScenarioForView.target_ids.record}` },
   'record connections must resolve only against current raw records');
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'project', target_id: 'project-a', origin: 'auto', label: '신뢰하면 안 되는 라벨' },
-  connectionRecords, projects,
-), { label: '생활 OS', href: '' },
+  { kind: 'project', target_id: typedScenarioForView.target_ids.project, origin: 'auto', label: '신뢰하면 안 되는 라벨' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'project', label:'[프로젝트] 생활 OS', href:'' },
   'project connections must resolve only against the projected project catalog');
 assert.deepEqual(viewContracts.resolveConnection(
-  { kind: 'record', target_id: 'gone', origin: 'auto' }, connectionRecords, projects,
-), { label: '대상 없음', href: '' }, 'unknown targets must not render a link');
+  { kind:'daily_note', target_id:typedScenarioForView.target_ids.daily_note, origin:'source' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'daily_note', label:'[하루 기록] 2026-08-23', href:'' },
+  'Daily Note connections use only their canonical graph date and never card navigation');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind:'record', target_id:'gone', origin:'auto' }, connectionRecords, projects,
+  canonicalProjection.graph_current,
+), { kind:'', label:'대상 없음', href:'' }, 'unknown graph targets must not render a link');
+assert.deepEqual(viewContracts.resolveConnection(
+  { kind:'project', target_id:typedScenarioForView.target_ids.record, origin:'auto' },
+  connectionRecords, projects, canonicalProjection.graph_current,
+), { kind:'', label:'대상 없음', href:'' }, 'a connection kind cannot disagree with the graph target kind');
 assert.match(viewContracts.recordSearchText({ body: '기록', displayTags: [], detail: [], relatedItems: [
   { label: '생활 OS', href: '' },
 ] }), /생활 OS/, 'resolved related labels must be searchable');
@@ -399,6 +748,101 @@ const eventCatalog = {
   projects: { 'project-a': { title: '생활 OS' } },
 };
 const eventBase = { event_id: 'event-123', client_created_at: EVENT_TIME, record:eventRecord };
+
+const graphCommandContracts = new Function(`
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('canonicalizeQueuedGraphCommand')}
+  ${namedFunction('buildGraphCommand')}
+  ${namedFunction('resolveGraphReceipt')}
+  ${namedFunction('validateGraphFailureReceipt')}
+  return {
+    validateGraphCurrent, canonicalizeQueuedGraphCommand, buildGraphCommand,
+    resolveGraphReceipt, validateGraphFailureReceipt,
+  };
+`)();
+const GRAPH_EVENT_ID = `graph-user-${'a'.repeat(32)}`;
+const graphCurrent = canonicalProjection.graph_current;
+const graphSourceId = canonicalProjection.scenarios.source_only.record_id;
+const graphSourceNode = graphCurrent.nodes.find(node => node.node_id === graphSourceId);
+const graphRecord = { record_id:graphSourceId, content_hash:graphSourceNode.content_hash };
+const graphBase = { event_id:GRAPH_EVENT_ID, client_created_at:EVENT_TIME, record:graphRecord };
+const graphAddTag = graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, raw_display_value:' Straße ', injected:'must-not-survive',
+}, graphCurrent);
+assert.deepEqual(graphAddTag, { ok:true, value:{
+  schema_version:1, event_id:GRAPH_EVENT_ID, node_id:graphSourceId,
+  action:'add_tag', client_created_at:EVENT_TIME,
+  facts:[{ kind:'tag', raw_display_value:' Straße ' }],
+} }, 'the browser preserves the raw tag display and leaves Unicode normalization to Python');
+assert.doesNotMatch(JSON.stringify(graphAddTag.value), /normalized_key|content_hash|source_hash|provenance/,
+  'an add-tag command must not invent backend-owned normalization, scope, or provenance fields');
+
+const currentTag = graphSourceNode.tags[0];
+assert.deepEqual(graphCommandContracts.buildGraphCommand('remove_tag', {
+  ...graphBase, normalized_key:currentTag.normalized_key,
+}, graphCurrent).value.facts, [{ kind:'tag', normalized_key:currentTag.normalized_key }],
+  'tag removal reuses the exact normalized key projected by Python');
+assert.equal(graphCommandContracts.buildGraphCommand('remove_tag', {
+  ...graphBase, normalized_key:'STRASSE',
+}, graphCurrent).ok, false, 'the browser cannot synthesize a replacement normalized key');
+
+const typedScenario = canonicalProjection.scenarios.typed_links;
+const typedSourceNode = graphCurrent.nodes.find(node => node.node_id === typedScenario.record_id);
+const typedRecord = { record_id:typedSourceNode.node_id, content_hash:typedSourceNode.content_hash };
+const recordLink = typedSourceNode.links.find(link => link.relation === 'related');
+assert.deepEqual(graphCommandContracts.buildGraphCommand('remove_link', {
+  ...graphBase, record:typedRecord,
+  connection:{ target_id:recordLink.target_id, relation:recordLink.relation },
+}, graphCurrent).value.facts, [{
+  kind:'link', target_id:recordLink.target_id, relation:'related',
+}], 'link removal preserves the projected typed relation');
+assert.deepEqual(graphCommandContracts.buildGraphCommand('add_link', {
+  ...graphBase,
+  connection:{ target_id:typedScenario.target_ids.project, relation:'related_project' },
+}, graphCurrent).value.facts, [{
+  kind:'link', target_id:typedScenario.target_ids.project, relation:'related_project',
+}], 'link addition derives a relation that matches the graph target kind');
+assert.equal(graphCommandContracts.buildGraphCommand('add_link', {
+  ...graphBase,
+  connection:{ target_id:typedScenario.target_ids.project, relation:'related' },
+}, graphCurrent).ok, false, 'a relation that disagrees with the target kind is rejected');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, event_id:'event-123', raw_display_value:'tag',
+}, graphCurrent).ok, false, 'legacy event IDs cannot enter the graph pending path');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, tag:'legacy tag',
+}, graphCurrent).ok, false, 'the graph builder does not accept the legacy normalized tag input');
+assert.equal(graphCommandContracts.buildGraphCommand('add_tag', {
+  ...graphBase, record:{ ...graphRecord, content_hash:HASH_B }, raw_display_value:'tag',
+}, graphCurrent).reason, 'stale_scope', 'a command created against stale record content remains local');
+
+assert.equal(graphCommandContracts.validateGraphCurrent(graphCurrent).ok, true,
+  'the app-first graph projection without receipts remains readable');
+const graphWithReceipt = structuredClone(graphCurrent);
+graphWithReceipt.event_receipts = {
+  [GRAPH_EVENT_ID]:{ status:'applied', safe_reason:'applied' },
+};
+assert.equal(graphCommandContracts.validateGraphCurrent(graphWithReceipt).ok, true,
+  'the post-cutover graph projection accepts exact user receipts');
+const invalidGraphReceipt = structuredClone(graphWithReceipt);
+invalidGraphReceipt.event_receipts['graph-source-event'] = { status:'applied', safe_reason:'applied' };
+assert.equal(graphCommandContracts.validateGraphCurrent(invalidGraphReceipt).ok, false,
+  'source and auto graph events cannot appear in the user receipt ledger');
+assert.deepEqual(graphCommandContracts.resolveGraphReceipt(graphAddTag.value, graphCurrent), {
+  state:'waiting', reason:'',
+}, 'a successful upload remains pending while its exact graph receipt is absent');
+assert.deepEqual(graphCommandContracts.resolveGraphReceipt(graphAddTag.value, graphWithReceipt), {
+  state:'applied', reason:'applied',
+}, 'only the exact applied graph receipt completes the command');
+const safeFailure = {
+  byte_size:123, content_sha256:'b'.repeat(64), filename:`${GRAPH_EVENT_ID}.json`,
+  reason_code:'invalid_tag', status:'permanently_invalid',
+};
+assert.deepEqual(graphCommandContracts.validateGraphFailureReceipt(safeFailure, GRAPH_EVENT_ID), {
+  state:'failed', reason:'invalid_tag',
+}, 'a sanitized terminal failure can stop retrying the exact event');
+assert.equal(graphCommandContracts.validateGraphFailureReceipt({ ...safeFailure, raw:'secret' }, GRAPH_EVENT_ID), null,
+  'terminal failure receipts reject extra raw fields');
 
 const addTag = eventContracts.buildEnrichmentEvent('add_tag', {
   ...eventBase, tag:' ##  새로운   태그 ', origin:'forbidden', provider:'forbidden',
@@ -519,6 +963,20 @@ assert.equal(putCalls[0].path, 'enrichment/pending/event-123.json',
 assert.deepEqual(JSON.parse(putCalls[0].options.body).message, 'enrichment: add_tag event-123',
   'the commit message may contain only the safe action and event ID');
 
+const graphPutCalls = [];
+const graphPutContract = new Function('gh', 'b64encode', 'cfg', `
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('canonicalizeQueuedGraphCommand')}
+  ${namedFunction('putGraphCommand')}
+  return putGraphCommand;
+`)(async (path, options) => { graphPutCalls.push({ path, options }); return {}; }, value => `encoded:${value}`, {});
+await graphPutContract(graphAddTag.value, graphCurrent);
+assert.equal(graphPutCalls.length, 1, 'a canonical graph command may issue one PUT');
+assert.equal(graphPutCalls[0].path, `graph/pending/${GRAPH_EVENT_ID}.json`,
+  'graph corrections write only to their immutable graph pending path');
+assert.equal(JSON.parse(graphPutCalls[0].options.body).message, `graph: add_tag ${GRAPH_EVENT_ID}`,
+  'graph commit messages contain only the safe action and event ID');
+
 function makeMemoryStore(seed = {}) {
   const state = new Map(Object.entries(seed));
   return {
@@ -542,6 +1000,51 @@ function makeQueueContracts(store, put) {
     return { flushEnrichments, queueEnrichment, submitEnrichmentEvent };
   `)(store, put, eventCatalog.records, { targets:{ projects:eventCatalog.projects } });
 }
+
+function makeGraphQueueContracts(store, put, graph, failureReceipt = async () => null) {
+  return new Function('ls', 'putGraphCommand', 'GRAPH', 'loadGraphFailureReceipt', 'toast', `
+    const LS = { gq:'gq', gx:'gx', gp:'gp', gr:'gr' };
+    ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('canonicalizeQueuedGraphCommand')}
+    ${namedFunction('buildGraphCommand')}
+    ${namedFunction('resolveGraphReceipt')}
+    ${namedFunction('quarantineGraph')}
+    ${namedFunction('markGraphPending')}
+    ${namedFunction('flushGraphCommands')}
+    ${namedFunction('queueGraphCommand')}
+    ${namedFunction('submitGraphCommand')}
+    ${namedFunction('reconcileGraphPending')}
+    return { flushGraphCommands, queueGraphCommand, submitGraphCommand, reconcileGraphPending };
+  `)(store, put, graph, failureReceipt, () => {});
+}
+
+const offlineGraph = structuredClone(graphCurrent);
+const offlineGraphStore = makeMemoryStore();
+const offlineGraphQueue = makeGraphQueueContracts(
+  offlineGraphStore, async () => { throw new Error('offline'); }, offlineGraph,
+);
+const offlineGraphResult = await offlineGraphQueue.submitGraphCommand('add_tag', {
+  ...graphBase, raw_display_value:'offline graph tag',
+});
+assert.equal(offlineGraphResult.transport, 'offline',
+  'a graph transport failure keeps the canonical command in its separate offline queue');
+assert.deepEqual(offlineGraphStore.get('gq', []), [offlineGraphResult.value],
+  'the graph offline queue stores only the canonical command schema');
+assert.deepEqual(offlineGraphStore.get('gp', {})[GRAPH_EVENT_ID], {
+  event_id:GRAPH_EVENT_ID, record_id:graphSourceId, action:'add_tag', transport:'offline',
+}, 'an offline graph command is pending, not applied');
+await offlineGraphQueue.reconcileGraphPending();
+assert.ok(offlineGraphStore.get('gp', {})[GRAPH_EVENT_ID],
+  'a missing graph receipt leaves the command pending across refreshes');
+offlineGraph.event_receipts = {
+  [GRAPH_EVENT_ID]:{ status:'applied', safe_reason:'applied' },
+};
+await offlineGraphQueue.reconcileGraphPending();
+assert.deepEqual(offlineGraphStore.get('gp', {}), {},
+  'the exact applied graph receipt clears the pending command');
+assert.deepEqual(offlineGraphStore.get('gr', {})[graphSourceId], {
+  event_id:GRAPH_EVENT_ID, state:'applied', reason:'applied',
+}, 'receipt reconciliation stores only a safe per-record result');
 
 const offlineStore = makeMemoryStore();
 const offline = makeQueueContracts(offlineStore, async () => { throw new Error('offline'); });
@@ -574,37 +1077,45 @@ assert.equal(flushStore.get('ep', {})['event-123'].transport, 'queued',
 
 const controlStore = makeMemoryStore();
 const controlContracts = new Function('esc', 'ls', 'STATUS_REASON_LABEL', `
-  const LS = { er:'er' };
+  const LS = { er:'er', gr:'gr', gp:'gp' };
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('privacyDecisionIsCurrent')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('graphResultForRecord')}
+  ${namedFunction('graphPendingForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('connectionCandidates')}
+  ${namedFunction('searchConnectionCandidates')}
   ${namedFunction('renderEnrichmentControls')}
-  return { privacyDecisionIsCurrent, enrichmentControlState, connectionCandidates, renderEnrichmentControls };
+  return {
+    privacyDecisionIsCurrent, graphPendingForRecord, enrichmentControlState,
+    connectionCandidates, searchConnectionCandidates, renderEnrichmentControls,
+  };
 `)(value => String(value).replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[char])), controlStore, STATUS_REASON_LABEL);
 
 const editableRecord = {
-  record_id:'rec-a', source_hash:HASH_A, redaction_version:3, enrichmentStatus:'completed',
-  displayTags:['하나'], connections:[],
+  record_id:'rec-a', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3, enrichmentStatus:'completed',
+  displayTags:['하나'], displayTagOrigins:[{ value:'하나', normalized_key:'하나', origin:'user' }],
+  connections:[], graphCurrent:true,
 };
 assert.deepEqual(controlContracts.enrichmentControlState(editableRecord, 'loaded'), {
-  enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_connection','remove_connection'],
-  tagSlots:2, connectionSlots:3,
-}, 'a compatible, currently scoped ordinary record exposes compact correction controls');
+  enabled:true, mode:'normal', actions:['add_tag','remove_tag','add_link','remove_link'],
+}, 'a current graph record exposes compact graph correction controls');
 assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, record_id:'' }, 'loaded').enabled, false,
-  'a missing record ID must disable every enrichment action');
-assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, redaction_version:0 }, 'loaded').enabled, false,
-  'a missing current redaction version must disable every enrichment action');
-assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatible').enabled, false,
-  'an incompatible sidecar must not expose write actions');
+  'a missing record ID must disable every graph action');
+assert.equal(controlContracts.enrichmentControlState({ ...editableRecord, graphCurrent:false }, 'loaded').enabled, false,
+  'a record without an exact current graph node must not expose graph writes');
+assert.equal(controlContracts.enrichmentControlState(editableRecord, 'incompatible').enabled, true,
+  'ordinary graph corrections remain independent from an incompatible enrichment sidecar');
 
 const privacyRecord = { ...editableRecord, enrichmentStatus:'privacy_review_required' };
 assert.deepEqual(controlContracts.enrichmentControlState(privacyRecord, 'cached'), {
   enabled:true, mode:'privacy', actions:['allow_redacted','allow_original','skip_enrichment'],
-  tagSlots:2, connectionSlots:3,
 }, 'privacy review exposes exactly the three scope-bound privacy choices from a valid cached sidecar');
 const privacyControls = controlContracts.renderEnrichmentControls(privacyRecord, 'cached', {
   targets:{ records:{ 'rec-b':{ title:'후보 기록' }, 'rec-a':{ title:'현재 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
@@ -612,11 +1123,26 @@ const privacyControls = controlContracts.renderEnrichmentControls(privacyRecord,
 assert.match(privacyControls, /data-enrich-action="allow_redacted"/, 'privacy controls include redacted permission');
 assert.match(privacyControls, /data-enrich-action="allow_original"/, 'privacy controls include original permission');
 assert.match(privacyControls, /data-enrich-action="skip_enrichment"/, 'privacy controls include skip permission');
-assert.doesNotMatch(privacyControls, /add_tag|add_connection/, 'privacy controls must not mix in ordinary correction actions');
+assert.doesNotMatch(privacyControls, /add_tag|add_link/, 'privacy controls must not mix in ordinary graph correction actions');
 const pendingControls = controlContracts.renderEnrichmentControls({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', {
   targets:{ records:{}, projects:{} },
 });
 assert.equal(pendingControls, '', 'ordinary correction controls stay hidden until automatic enrichment completes');
+controlStore.set('gp', { [GRAPH_EVENT_ID]:{
+  event_id:GRAPH_EVENT_ID, record_id:'rec-a', action:'add_tag', transport:'offline',
+} });
+const offlinePendingControls = controlContracts.renderEnrichmentControls(editableRecord, 'loaded', {
+  targets:{ records:{}, projects:{} },
+});
+assert.match(offlinePendingControls, /오프라인 — 전송 대기/,
+  'a graph command remains visibly pending after the card is rerendered');
+controlStore.set('gp', { [GRAPH_EVENT_ID]:{
+  event_id:GRAPH_EVENT_ID, record_id:'rec-a', action:'add_tag', transport:'queued',
+} });
+assert.match(controlContracts.renderEnrichmentControls(editableRecord, 'loaded', {
+  targets:{ records:{}, projects:{} },
+}), /수정 요청 반영 대기/, 'a delivered graph command is still pending until its receipt arrives');
+controlStore.set('gp', {});
 controlStore.set('er', { 'rec-a':{
   event_id:'event-future', state:'rejected', reason:'future_safe_reason',
 } });
@@ -632,29 +1158,101 @@ assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_A, redaction_version:3,
 }, editableRecord), true, 'a privacy choice is current only for its exact source and redaction scope');
 assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', content_hash:HASH_B, redaction_version:3,
+}, editableRecord), true, 'a privacy choice is current for its exact content and redaction scope');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_B, redaction_version:3,
 }, editableRecord), false, 'a privacy choice expires when the source changes');
 assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', content_hash:HASH_A, redaction_version:3,
+}, editableRecord), false, 'a privacy choice expires when the content changes');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
   action:'allow_redacted', source_hash:HASH_A, redaction_version:2,
 }, editableRecord), false, 'a privacy choice expires when redaction changes');
+assert.equal(controlContracts.privacyDecisionIsCurrent({
+  action:'allow_original', source_hash:HASH_A, content_hash:HASH_B, redaction_version:3,
+}, editableRecord), false, 'a malformed dual-scoped privacy decision is never current');
 
-assert.deepEqual(controlContracts.connectionCandidates(editableRecord, {
-  targets:{ records:{ 'rec-a':{ title:'현재 기록' }, 'rec-b':{ title:'후보 기록' } }, projects:{ 'project-a':{ title:'생활 OS' } } },
-}), [
-  { kind:'record', target_id:'rec-b', label:'후보 기록' },
-  { kind:'project', target_id:'project-a', label:'생활 OS' },
-], 'connection controls must offer only sidecar catalog candidates and never the current record');
+const candidateSource = {
+  ...editableRecord, record_id:canonicalProjection.scenarios.source_only.record_id,
+  body:'현재 기록', date:'2026-08-23', connections:[],
+};
+const candidateRecordId = canonicalProjection.scenarios.auto_only.record_id;
+const candidateRecords = [candidateSource, {
+  record_id:candidateRecordId, body:'후보 기록', date:'2026-08-22',
+  detail:['private-detail-keyword'], url:'https://example.test/private-url-keyword',
+}];
+const candidateEnrichments = {
+  targets:{ records:{}, projects:{ [typedScenarioForView.target_ids.project]:{ title:'생활 OS' } } },
+};
+assert.deepEqual(controlContracts.connectionCandidates(
+  candidateSource, candidateRecords, candidateEnrichments, canonicalProjection.graph_current,
+).map(candidate => [candidate.kind, candidate.target_id, candidate.label]), [
+  ['record', candidateRecordId, '[기록] 후보 기록'],
+  ['project', typedScenarioForView.target_ids.project, '[프로젝트] 생활 OS'],
+  ['daily_note', typedScenarioForView.target_ids.daily_note, '[하루 기록] 2026-08-23'],
+], 'connection controls use the live graph catalog and distinguish all three target types');
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-08-23', candidateRecords, candidateEnrichments,
+  canonicalProjection.graph_current,
+).map(candidate => candidate.kind), ['daily_note'],
+  'an exact relevant date can find its Daily Note target');
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026', candidateRecords, candidateEnrichments,
+  canonicalProjection.graph_current,
+).filter(candidate => candidate.kind === 'daily_note'), [],
+  'a broad query never lists every Daily Note date');
+for(const privateQuery of ['private-detail-keyword', 'private-url-keyword']){
+  assert.deepEqual(controlContracts.searchConnectionCandidates(
+    candidateSource, privateQuery, candidateRecords, candidateEnrichments,
+    canonicalProjection.graph_current,
+  ), [], 'record detail and URL text never become connection-search tokens');
+}
+const deletedDailyGraph = structuredClone(canonicalProjection.graph_current);
+deletedDailyGraph.nodes.find(node => node.node_id === typedScenarioForView.target_ids.daily_note).deleted = true;
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-08-23', candidateRecords, candidateEnrichments, deletedDailyGraph,
+), [], 'deleted graph targets cannot return as connection candidates');
+const invalidDateGraph = structuredClone(canonicalProjection.graph_current);
+invalidDateGraph.nodes.find(node => node.node_id === typedScenarioForView.target_ids.daily_note).node_id = 'note-2026-99-99';
+invalidDateGraph.contains.forEach(edge => { if(edge.source_id === typedScenarioForView.target_ids.daily_note) edge.source_id = 'note-2026-99-99'; });
+invalidDateGraph.nodes.forEach(node => node.links.forEach(link => {
+  if(link.target_id === typedScenarioForView.target_ids.daily_note) link.target_id = 'note-2026-99-99';
+}));
+assert.deepEqual(controlContracts.searchConnectionCandidates(
+  candidateSource, '2026-99-99', candidateRecords, candidateEnrichments, invalidDateGraph,
+), [], 'a syntactically safe but impossible Daily Note date is not exposed');
+assert.equal(controlContracts.connectionCandidates({
+  ...candidateSource, connections:[{
+    kind:'project', target_id:typedScenarioForView.target_ids.project,
+  }],
+}, candidateRecords, candidateEnrichments, canonicalProjection.graph_current)
+  .some(candidate => candidate.target_id === typedScenarioForView.target_ids.project), false,
+  'an existing connection is omitted from the graph candidate list');
 
-const tagLimitControls = controlContracts.renderEnrichmentControls({
-  ...editableRecord, displayTags:['하나','둘','셋'],
+const manyTagControls = controlContracts.renderEnrichmentControls({
+  ...editableRecord, displayTags:['하나','둘','셋','넷'],
 }, 'loaded', { targets:{ records:{}, projects:{} } });
-assert.match(tagLimitControls, /data-enrich-add-tag[^>]*disabled/, 'adding tags is disabled after three projected tags');
+assert.doesNotMatch(manyTagControls, /data-enrich-add-tag[^>]*disabled|최대 3개/,
+  'the former enrichment quality cap does not block graph tag corrections');
+const manyConnectionControls = controlContracts.renderEnrichmentControls({
+  ...editableRecord, connections:[1,2,3,4].map(index => ({
+    kind:'record', target_id:`rec-${index}`, relation:'related',
+  })),
+}, 'loaded', { targets:{ records:{}, projects:{} } });
+assert.doesNotMatch(manyConnectionControls, /data-enrich-connection-search[^>]*disabled|최대 3개/,
+  'the former enrichment quality cap does not block graph link corrections');
 
 const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASON_LABEL', 'enrichmentLoadState', 'ENRICH', 'ls', 'LS', `
   ${namedFunction('statusLabel')}
   ${namedFunction('recordDate')}
+  ${namedFunction('normalizeEnrichmentTag')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('enrichmentRejectionLabel')}
   ${namedFunction('enrichmentResultForRecord')}
+  ${namedFunction('graphResultForRecord')}
+  ${namedFunction('graphPendingForRecord')}
   ${namedFunction('enrichmentControlState')}
   ${namedFunction('visibleEnrichmentIssue')}
   ${namedFunction('renderEnrichmentIssue')}
@@ -669,7 +1267,7 @@ const cardContracts = new Function('esc', 'COLOR', 'STATUS_LABEL', 'STATUS_REASO
   return { visibleEnrichmentIssue, renderEnrichmentIssue, rankConnectionCandidates, renderRecordMetadata, renderEnrichmentEditor, card };
 `)(value => String(value).replace(/[&<>\"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;',
-}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er' });
+}[char])), { memo:'var(--c1)' }, STATUS_LABEL, STATUS_REASON_LABEL, 'loaded', { targets:{ records:{}, projects:{} } }, controlStore, { er:'er', gr:'gr', gp:'gp' });
 
 for(const status of ['completed', 'pending', 'skipped']){
   const rendered = cardContracts.card({ ...editableRecord, type:'memo', body:'정상 본문', date:'2026-08-24',
@@ -691,8 +1289,8 @@ assert.match(cardContracts.renderEnrichmentIssue({ ...privacyRecord, type:'memo'
   'privacy review renders a concise issue rather than raw diagnostic fields');
 for(const sidecarState of ['unavailable', 'incompatible']){
   const editor = cardContracts.renderEnrichmentEditor(editableRecord, sidecarState, { targets:{ records:{}, projects:{} } });
-  assert.match(editor, /data-enrich-edit[^>]*disabled[^>]*분석 상태를 확인한 뒤 수정 가능/,
-    `${sidecarState} sidecars disable editing with an accessible reason`);
+  assert.match(editor, /data-enrich-edit(?![^>]*disabled)/,
+    `${sidecarState} enrichment sidecars do not disable a current graph editor`);
 }
 const pendingEditor = cardContracts.renderEnrichmentEditor({ ...editableRecord, enrichmentStatus:'pending' }, 'loaded', { targets:{ records:{}, projects:{} } });
 assert.match(pendingEditor, /data-enrich-edit[^>]*disabled[^>]*분석 완료 전에는 수정할 수 없음/,
@@ -729,26 +1327,51 @@ assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
   'namespaced cards never derive a logical record ID from their DOM ID');
 assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
   'edit opening and connection search resolve records from data-record-id');
+assert.match(bindSource, /searchConnectionCandidates\(record, query, ALL, ENRICH, GRAPH\)/,
+  'interactive connection search uses the validated graph target catalog');
 const privacyEditor = cardContracts.renderEnrichmentEditor(privacyRecord, 'loaded', { targets:{ records:{}, projects:{} } });
 assert.match(privacyEditor, /allow_redacted[\s\S]*allow_original[\s\S]*skip_enrichment/,
   'privacy review keeps all three privacy actions behind its explicit edit control');
 
-const ranked = cardContracts.rankConnectionCandidates({ ...editableRecord, body:'ＡＩ 모바일 자동화', date:'2026-08-20' }, [
-  { record_id:'rec-z', body:'ai 자동화', displayTags:['모바일'], date:'2026-08-21' },
-  { record_id:'rec-b', body:'AI 자동화', displayTags:['모바일'], date:'2026-08-22' },
-  { record_id:'rec-a', body:'self', displayTags:[], date:'2026-08-23' },
-], { targets:{ records:{}, projects:{ 'project-a':{ title:'AI 자동화' } } } });
-assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_id}`), ['record:rec-b', 'record:rec-z', 'project:project-a'],
-  'recommendations use NFKC common-token score, newest date, and target ID ordering');
-assert.match(cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
-  { label:'관련 기록', href:'#record-rec-b' },
-  { label:'생활 OS', href:'' },
+const ranked = cardContracts.rankConnectionCandidates({
+  ...candidateSource, body:'ＡＩ 모바일 자동화', date:'2026-08-23',
+}, [candidateSource, {
+  record_id:candidateRecordId, body:'AI 자동화', displayTags:['모바일'], date:'2026-08-22',
+}], { targets:{ records:{}, projects:{
+  [typedScenarioForView.target_ids.project]:{ title:'AI 자동화' },
+} } }, canonicalProjection.graph_current);
+assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_id}`), [
+  `record:${candidateRecordId}`, `project:${typedScenarioForView.target_ids.project}`,
+  `daily_note:${typedScenarioForView.target_ids.daily_note}`,
+], 'recommendations use graph targets, NFKC common-token score, and relevant Daily Note dates');
+const typedMetadata = cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
+  { kind:'record', label:'[기록] 관련 기록', href:'#record-rec-b' },
+  { kind:'project', label:'[프로젝트] 생활 OS', href:'' },
+  { kind:'daily_note', label:'[하루 기록] 2026-08-23', href:'' },
 ], connections:[
   { kind:'record', target_id:'rec-b' }, { kind:'project', target_id:'project-a' },
-] }), /분류·관계 메타데이터[\s\S]*태그[\s\S]*metadata-connections[\s\S]*연결[\s\S]*data-focus-record/,
+  { kind:'daily_note', target_id:'note-2026-08-23' },
+] });
+assert.match(typedMetadata, /분류·관계 메타데이터[\s\S]*태그[\s\S]*metadata-connections[\s\S]*연결[\s\S]*data-focus-record/,
   'metadata has labeled tags and neutral connected-record chips separate from external URLs');
+assert.equal((typedMetadata.match(/data-focus-record=/g) || []).length, 1,
+  'only record connections expose in-app card navigation');
+assert.match(typedMetadata, /\[프로젝트\] 생활 OS[\s\S]*\[하루 기록\] 2026-08-23/,
+  'project and Daily Note connections remain typed non-navigation chips');
+const missingRecordMetadata = cardContracts.renderRecordMetadata({ ...editableRecord,
+  relatedItems:[{ kind:'', label:'대상 없음', href:'' }],
+  connections:[{ kind:'record', target_id:'gone' }],
+});
+assert.doesNotMatch(missingRecordMetadata, /data-focus-record/,
+  'a graph-rejected record-shaped connection cannot regain navigation from its raw kind');
 assert.match(html, /metadata-connections \.metadata-values\{[^}]*flex-wrap:nowrap[^}]*overflow:hidden/,
   'connection metadata is constrained to a single visible line');
+assert.match(html, /html\{-webkit-text-size-adjust:100%;text-size-adjust:100%\}/,
+  'mobile text autosizing is fixed without disabling full-page pinch zoom');
+assert.match(html, /\.card\{[^}]*width:100%;min-width:0;max-width:100%\}/,
+  'record cards keep a fixed width inside responsive grid tracks');
+assert.match(html, /\.card p\{[^}]*overflow-wrap:anywhere;word-break:break-word;/,
+  'long record text wraps instead of expanding the card width');
 
 const focusState = { q:'현재 검색', tag:'memo', undone:true };
 const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };
@@ -795,13 +1418,16 @@ function makePreCutoverApp(records, initialSidecar) {
     const LS = { d:'capture-data', q:'capture-queue', e:'sidecar', ee:'sidecar-etag', ea:'sidecar-at',
       eq:'enrichment-queue', ex:'enrichment-quarantine', ep:'enrichment-pending' };
     let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+    let GRAPH = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
     let enrichmentLoadState = 'unavailable', ALL = [];
     ${namedFunction('normalizeEnrichmentTag')}
     ${namedFunction('buildEnrichmentEvent')}
     ${namedFunction('canonicalizeQueuedEnrichment')}
     ${namedFunction('resolveEnrichmentReceipt')}
     ${namedFunction('validateEnrichments')}
+    ${namedFunction('validateGraphCurrent')}
     ${namedFunction('composeRecords')}
+    ${namedFunction('graphTargetCatalog')}
     ${namedFunction('resolveConnection')}
     ${namedFunction('resolveConnections')}
     ${namedFunction('recordDate')}
@@ -815,6 +1441,7 @@ function makePreCutoverApp(records, initialSidecar) {
     ${namedFunction('submitEnrichmentEvent')}
     ${namedFunction('reconcileEnrichmentPending')}
     ${namedFunction('loadEnrichments')}
+    function flushGraphCommands() {}
     ${namedFunction('loadData')}
     return {
       loadData, submitEnrichmentEvent,

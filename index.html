@@ -11,6 +11,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23b9542a'/%3E%3Ctext x='90' y='124' font-size='96' text-anchor='middle' fill='%23fff' font-family='sans-serif'%3E%E2%9C%8E%3C/text%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%23b9542a'/%3E%3Ctext x='90' y='124' font-size='96' text-anchor='middle' fill='%23fff' font-family='sans-serif'%3E%E2%9C%8E%3C/text%3E%3C/svg%3E">
 <style>
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
   :root{
     --bg:#faf9f7; --card:#fff; --ink:#1c1b19; --dim:#7a756e; --line:#e6e2dc;
     --accent:#b9542a; --ok:#3f7d58;
@@ -124,17 +125,17 @@
     color:var(--dim);font-size:12.5px;cursor:pointer}
   .chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 
-  .list{display:grid;gap:9px}
+  .list{display:grid;gap:9px;min-width:0}
   @media(min-width:560px){ .list{grid-template-columns:1fr 1fr} }
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
-  .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;width:100%;min-width:0;max-width:100%}
+  .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;min-width:0}
   .card .t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:99px;color:#fff}
-  .card .d{font-size:11px;color:var(--dim)}
+  .card .d{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--dim)}
   .card .d em{font-style:normal;opacity:.65;margin-left:6px}
   .stat.tap{cursor:pointer}
   .stat.tap.on{border-color:var(--accent);background:var(--accent)}
   .stat.tap.on .n,.stat.tap.on .l{color:#fff}
-  .card p{margin:0;font-size:13.5px;white-space:pre-wrap;
+  .card p{margin:0;min-width:0;max-width:100%;font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;
     display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
   .card p.open{-webkit-line-clamp:unset}
   /* 끝낸 것 — 할일·읽을거리·장소가 done 을 씁니다 */
@@ -159,6 +160,8 @@
   .card .metadata-chip{display:inline-flex;align-items:center;gap:3px;min-height:24px;padding:2px 7px;border:1px solid var(--line);border-radius:99px;color:var(--ink);background:color-mix(in srgb,var(--card) 88%,var(--line));font-size:11px;text-decoration:none}
   .card button.metadata-chip{cursor:pointer;font:inherit}
   .card .metadata-chip.project::before{content:'▣';color:var(--dim)}
+  .card .metadata-chip.daily_note::before{content:'◷';color:var(--dim)}
+  .card .metadata-chip.document::before{content:'▤';color:var(--dim)}
   .card .metadata-chip.focused{outline:2px solid var(--accent);outline-offset:2px}
   .card.focused{outline:2px solid var(--accent);outline-offset:2px}
   .card .enrichment-issue{margin:7px 0 0;padding:7px 9px;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;background:color-mix(in srgb,var(--accent) 8%,var(--card));font-size:11.5px;color:var(--ink)}
@@ -325,7 +328,8 @@ const LS = {
   cfg:'yz-cfg', q:'yz-queue', r:'yz-recent', t:'yz-type', d:'yz-data', p:'yz-proj',
   e:'yz-enrich', ee:'yz-enrich-etag', ea:'yz-enrich-at',
   eq:'yz-enrich-queue', ex:'yz-enrich-quarantine', ep:'yz-enrich-pending',
-  er:'yz-enrich-results'
+  er:'yz-enrich-results', gq:'yz-graph-queue', gx:'yz-graph-quarantine',
+  gp:'yz-graph-pending', gr:'yz-graph-results'
 };
 
 const TYPES = [
@@ -470,7 +474,9 @@ const STATUS_REASON_LABEL = {
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
 let ENRICH = { schema_version:1, records:{}, targets:{ records:{}, projects:{} } };
+let GRAPH = { schema_version:1, projection_sequence:0, nodes:[], contains:[] };
 let enrichmentLoadState = 'unavailable';
+let graphLoadState = 'unavailable';
 /* undone = 위 칸("안 읽은 링크"·"가고싶은 곳")으로 걸렀을 때만 켜집니다.
    그 칸의 숫자가 처리 안 한 것만 센 값이라, 목록도 같은 기준이어야 합니다 */
 let st = { type:'memo', q:'', tag:'', undone:false };
@@ -536,6 +542,23 @@ async function putEnrichment(entry, catalog){
               'Content-Type':'application/json' },
     body: JSON.stringify({
       message:`enrichment: ${payload.action} ${payload.event_id}`,
+      content:b64encode(JSON.stringify(payload, null, 1))
+    })
+  });
+  return payload;
+}
+
+/* Graph corrections use their own immutable path and never reuse enrichment facts. */
+async function putGraphCommand(entry, graphCurrent){
+  const checked = canonicalizeQueuedGraphCommand(entry, graphCurrent);
+  if(!checked.ok) throw new Error(checked.reason);
+  const payload = checked.value;
+  await gh(`graph/pending/${payload.event_id}.json`, {
+    method:'PUT',
+    headers:{ 'Authorization':`Bearer ${cfg.token}`, 'Accept':'application/vnd.github+json',
+              'Content-Type':'application/json' },
+    body:JSON.stringify({
+      message:`graph: ${payload.action} ${payload.event_id}`,
       content:b64encode(JSON.stringify(payload, null, 1))
     })
   });
@@ -715,8 +738,9 @@ function validateEnrichments(value){
     const records = {};
     for(const [recordId, item] of Object.entries(value.records)){
       if(!safeId(recordId) || !isObject(item)) throw new Error('invalid record state');
-      const allowed = new Set(['record_id','source_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision']);
+      const allowed = new Set(['record_id','source_hash','content_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision']);
       if(!Object.keys(item).every(k => allowed.has(k)) || item.record_id !== recordId || !safeHash(item.source_hash)
+         || (item.content_hash !== undefined && !safeHash(item.content_hash))
          || !statuses.has(item.status) || !safeReason(item.status_reason)
          || !Number.isInteger(item.prompt_version) || item.prompt_version < 1
          || !Number.isInteger(item.redaction_version) || item.redaction_version < 1
@@ -769,16 +793,22 @@ function validateEnrichments(value){
       let privacyDecision = null;
       if(item.privacy_decision !== undefined){
         const decision = item.privacy_decision;
-        if(!isObject(decision) || !['action','source_hash','redaction_version'].every(key => key in decision)
-           || !Object.keys(decision).every(key => ['action','source_hash','redaction_version'].includes(key))
+        const hasSourceScope = isObject(decision) && Object.prototype.hasOwnProperty.call(decision, 'source_hash');
+        const hasContentScope = isObject(decision) && Object.prototype.hasOwnProperty.call(decision, 'content_hash');
+        const scopeKey = hasSourceScope ? 'source_hash' : 'content_hash';
+        const scopeHash = decision && decision[scopeKey];
+        const recordScopeHash = hasSourceScope ? item.source_hash : item.content_hash;
+        if(!isObject(decision) || hasSourceScope === hasContentScope
+           || !['action',scopeKey,'redaction_version'].every(key => key in decision)
+           || !Object.keys(decision).every(key => ['action',scopeKey,'redaction_version'].includes(key))
            || !['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
-           || !safeHash(decision.source_hash) || !Number.isInteger(decision.redaction_version)
+           || !safeHash(scopeHash) || scopeHash !== recordScopeHash || !Number.isInteger(decision.redaction_version)
            || decision.redaction_version < 1) throw new Error('invalid privacy decision');
-        privacyDecision = { action:decision.action, source_hash:decision.source_hash,
-          redaction_version:decision.redaction_version };
+        privacyDecision = { action:decision.action, [scopeKey]:scopeHash, redaction_version:decision.redaction_version };
       }
       records[recordId] = {
-        record_id:recordId, source_hash:item.source_hash, status:item.status, status_reason:item.status_reason,
+        record_id:recordId, source_hash:item.source_hash, content_hash:item.content_hash,
+        status:item.status, status_reason:item.status_reason,
         prompt_version:item.prompt_version, redaction_version:item.redaction_version,
         tags, connections, event_receipts:receipts,
         applied_event_ids:[...item.applied_event_ids], provenance, privacy_decision:privacyDecision
@@ -788,22 +818,200 @@ function validateEnrichments(value){
   }catch(error){ return { ok:false, value:empty }; }
 }
 
-function composeRecords(records, enrichments){
-  /* loadEnrichments supplies a strictly validated projection. Keep this join deliberately
-     small and data-only so callers can also compose an already validated v1 snapshot. */
+/* The graph is untrusted browser input. Validate its complete app-readable shape before
+   deriving facts, so a malformed node cannot selectively overwrite a raw record. */
+function validateGraphCurrent(value){
+  const empty = { schema_version:1, projection_sequence:0, nodes:[], contains:[], event_receipts:{} };
+  const safeId = id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(id);
+  const safeHash = hash => typeof hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(hash);
+  const safeText = (text, limit, multiline = false) => {
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    if(!codePoints.length || codePoints.length > limit) return false;
+    for(const character of codePoints){
+      if((multiline && ['\t','\r','\n'].includes(character))) continue;
+      if(/\p{Cc}|\p{Cs}/u.test(character)
+         || (!multiline && /\p{Zl}|\p{Zp}/u.test(character))) return false;
+    }
+    return true;
+  };
+  /* Python owns tag normalization (including Unicode casefold and post-casefold
+     decomposition).  The browser validates only transport safety and membership. */
+  const safeTagKey = text => {
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    return codePoints.length > 0 && codePoints.length <= 80
+      && !codePoints.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
+  const safeRawTagDisplay = text => {
+    const codePoints = typeof text === 'string' ? Array.from(text) : [];
+    return codePoints.length > 0 && codePoints.length <= 256
+      && !codePoints.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
+  const safeSourceLocator = value => safeText(value, 1024)
+    && !value.startsWith('/') && !value.includes('\\') && !/^[A-Za-z]:/.test(value)
+    && !value.split('/').some(part => !part || part === '.' || part === '..');
+  const safeSourceOrder = value => Number.isInteger(value) && value >= 0 && value <= 1000000;
+  const safeConfidence = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+  const safeRelation = value => ['related','related_project','previous_note','source_reference'].includes(value);
+  const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
+  try{
+    const topLevelKeys = Object.keys(value || {});
+    const appFirstKeys = ['schema_version','projection_sequence','nodes','contains'];
+    const receiptKeys = [...appFirstKeys, 'event_receipts'];
+    const topLevelShape = topLevelKeys.length === appFirstKeys.length
+      ? topLevelKeys.every(key => appFirstKeys.includes(key))
+      : topLevelKeys.length === receiptKeys.length && topLevelKeys.every(key => receiptKeys.includes(key));
+    if(!isObject(value) || value.schema_version !== 1 || !Number.isInteger(value.projection_sequence)
+       || value.projection_sequence < 0 || !Array.isArray(value.nodes) || !Array.isArray(value.contains)
+       || !topLevelShape || (value.event_receipts !== undefined && !isObject(value.event_receipts))
+       || value.nodes.length > 10000 || value.contains.length > 10000) throw new Error('unsupported schema');
+    const eventReceipts = {};
+    for(const [eventId, receipt] of Object.entries(value.event_receipts || {})){
+      if(!/^graph-user-[0-9a-f]{32}$/.test(eventId) || !isObject(receipt)
+         || Object.keys(receipt).length !== 2 || receipt.status !== 'applied'
+         || receipt.safe_reason !== 'applied') throw new Error('invalid graph receipt');
+      eventReceipts[eventId] = { status:'applied', safe_reason:'applied' };
+    }
+    const nodes = {}, nodeKinds = {}, tagKeysByNode = {};
+    for(const node of value.nodes){
+      if(!isObject(node) || !safeId(node.node_id) || !['record','project','daily_note','document','tag'].includes(node.kind)
+         || typeof node.deleted !== 'boolean' || !isObject(node.metadata) || !Array.isArray(node.tags)
+         || !Array.isArray(node.links) || !Array.isArray(node.continuations) || !Array.isArray(node.legacy_annotations)
+         || node.node_id in nodes || node.tags.length > 1000 || node.links.length > 1000) throw new Error('invalid node');
+      const common = new Set(['node_id','kind','metadata','deleted','tags','links','continuations','legacy_annotations']);
+      if(node.kind === 'record'){
+        common.add('content_hash');
+        if(!safeHash(node.content_hash)) throw new Error('invalid record hash');
+      }
+      if(!Object.keys(node).every(key => common.has(key))) throw new Error('invalid node field');
+      if(node.kind === 'tag'){
+        if(Object.keys(node.metadata).length !== 2 || !safeTagKey(node.metadata.normalized_key)
+           || !safeRawTagDisplay(node.metadata.raw_display_value)) throw new Error('invalid tag node');
+        tagKeysByNode[node.node_id] = node.metadata.normalized_key;
+      }else if(Object.keys(node.metadata).length) throw new Error('invalid node metadata');
+      nodes[node.node_id] = node; nodeKinds[node.node_id] = node.kind;
+    }
+    const checkedNodes = {};
+    for(const node of Object.values(nodes)){
+      const tags = [], tagKeys = new Set();
+      for(const tag of node.tags){
+        const base = new Set(['target_id','normalized_key','raw_display_value','origin','source_event_id']);
+        if(!isObject(tag) || !safeId(tag.target_id) || nodeKinds[tag.target_id] !== 'tag'
+           || !safeTagKey(tag.normalized_key) || !safeRawTagDisplay(tag.raw_display_value)
+           || tagKeysByNode[tag.target_id] !== tag.normalized_key
+           || !['source','auto','user'].includes(tag.origin) || !safeId(tag.source_event_id)
+           || tagKeys.has(tag.normalized_key)) throw new Error('invalid tag fact');
+        if(tag.origin === 'source'){
+          base.add('source_locator'); base.add('source_order');
+          if(!safeSourceLocator(tag.source_locator) || !safeSourceOrder(tag.source_order)) throw new Error('invalid tag source');
+        }else if(tag.origin === 'auto'){
+          base.add('confidence'); base.add('reason');
+          if(!safeConfidence(tag.confidence) || !safeText(tag.reason, 4096)) throw new Error('invalid tag auto');
+        }
+        if(!Object.keys(tag).every(key => base.has(key))) throw new Error('invalid tag field');
+        tagKeys.add(tag.normalized_key);
+        tags.push({ value:tag.raw_display_value, normalized_key:tag.normalized_key, origin:tag.origin });
+      }
+      const links = [], linkKeys = new Set();
+      for(const link of node.links){
+        const base = new Set(['target_id','relation','origin','source_event_id']);
+        if(!isObject(link) || !safeId(link.target_id) || !['record','project','daily_note','document'].includes(nodeKinds[link.target_id])
+           || !safeRelation(link.relation) || !['source','auto','user'].includes(link.origin) || !safeId(link.source_event_id)
+           || linkKeys.has(`${link.target_id}:${link.relation}`)) throw new Error('invalid link fact');
+        if(link.origin === 'source'){
+          base.add('source_locator'); base.add('source_order'); base.add('reason'); base.add('raw_text');
+          if(!safeSourceLocator(link.source_locator) || !safeSourceOrder(link.source_order)
+             || (link.reason !== undefined && !safeText(link.reason, 4096))
+             || (link.raw_text !== undefined && !safeText(link.raw_text, 4096, true))) throw new Error('invalid link source');
+        }else if(link.origin === 'auto'){
+          base.add('confidence'); base.add('reason');
+          if(!safeConfidence(link.confidence) || !safeText(link.reason, 4096)) throw new Error('invalid link auto');
+        }else{
+          base.add('reason');
+          if(link.reason !== undefined && !safeText(link.reason, 4096)) throw new Error('invalid link user');
+        }
+        if(!Object.keys(link).every(key => base.has(key))) throw new Error('invalid link field');
+        linkKeys.add(`${link.target_id}:${link.relation}`);
+        links.push({ kind:nodeKinds[link.target_id], target_id:link.target_id, origin:link.origin, relation:link.relation });
+      }
+      const annotationSafe = (item, kind) => {
+        if(!isObject(item) || item.kind !== kind || item.origin !== 'source' || !safeId(item.source_event_id)
+           || !safeText(item.section_label, 4096) || !safeText(item.raw_text, 4096, true)
+           || !safeSourceLocator(item.source_locator) || !safeSourceOrder(item.source_order)) return false;
+        const allowed = new Set(['kind','section_label','raw_text','source_locator','source_order','origin','source_event_id']);
+        if(kind === 'legacy_annotation'){
+          if(!['resolved','unresolved','needs_review','external_url','continuation','settled_non_edge'].includes(item.resolution_status)) return false;
+          allowed.add('resolution_status');
+          for(const field of ['resolved_target_id','relation','reason_text','continuation_text']) allowed.add(field);
+          if(item.resolved_target_id !== undefined && (!safeId(item.resolved_target_id) || !nodeKinds[item.resolved_target_id])) return false;
+          if(item.relation !== undefined && !safeRelation(item.relation)) return false;
+          if(item.reason_text !== undefined && !safeText(item.reason_text, 4096)) return false;
+          if(item.continuation_text !== undefined && !safeText(item.continuation_text, 4096, true)) return false;
+        }
+        return Object.keys(item).every(key => allowed.has(key));
+      };
+      if(!node.continuations.every(item => annotationSafe(item, 'continuation'))
+         || !node.legacy_annotations.every(item => annotationSafe(item, 'legacy_annotation'))) throw new Error('invalid annotation');
+      checkedNodes[node.node_id] = { node_id:node.node_id, kind:node.kind, deleted:node.deleted,
+        content_hash:node.content_hash, tags, links };
+    }
+    const contains = [];
+    const containsKeys = new Set();
+    for(const edge of value.contains){
+      if(!isObject(edge) || Object.keys(edge).length !== 2 || !safeId(edge.source_id) || !safeId(edge.target_id)
+         || nodeKinds[edge.source_id] !== 'daily_note' || nodeKinds[edge.target_id] !== 'record'
+         || containsKeys.has(`${edge.source_id}:${edge.target_id}`)) throw new Error('invalid contains edge');
+      containsKeys.add(`${edge.source_id}:${edge.target_id}`); contains.push({ source_id:edge.source_id, target_id:edge.target_id });
+    }
+    return { ok:true, value:{ schema_version:1, projection_sequence:value.projection_sequence,
+      nodes:Object.values(checkedNodes), contains, event_receipts:eventReceipts } };
+  }catch(error){ return { ok:false, value:empty }; }
+}
+
+function composeGraphFacts(graphCurrent){
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { ok:false, records:{} };
+  const records = {};
+  for(const node of checked.value.nodes){
+    if(node.kind === 'record') records[node.node_id] = {
+      content_hash:node.content_hash,
+      tags:node.deleted ? [] : node.tags,
+      connections:node.deleted ? [] : node.links,
+    };
+  }
+  return { ok:true, records };
+}
+
+function composeRecords(records, enrichments, graphCurrent){
+  /* Enrichment provides status/privacy only. Graph facts are primary once the exact
+     record and content scope are known; raw/enrichment facts remain a migration fallback. */
   const projected = enrichments && enrichments.schema_version === 1
     && enrichments.records && typeof enrichments.records === 'object' && !Array.isArray(enrichments.records)
     ? enrichments.records : {};
+  const graph = graphCurrent && typeof composeGraphFacts === 'function' ? composeGraphFacts(graphCurrent) : { ok:false, records:{} };
   return (Array.isArray(records) ? records : []).map(record => {
     const rawTags = Array.isArray(record.tags) ? record.tags : [];
     const state = projected[record.record_id];
-    if(!state || state.source_hash !== record.source_hash || !Array.isArray(state.tags)
-       || state.tags.some(tag => !tag || typeof tag.value !== 'string')) return { ...record, displayTags:rawTags };
-    return { ...record, displayTags:state.tags.map(tag => tag.value), displayTagOrigins:state.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
-      connections:Array.isArray(state.connections) ? state.connections : [],
+    const status = state && state.source_hash === record.source_hash ? {
       enrichmentStatus:state.status, enrichmentReason:state.status_reason,
       redaction_version:state.redaction_version, appliedEventIds:state.applied_event_ids,
-      eventReceipts:state.event_receipts, provenance:state.provenance, privacyDecision:state.privacy_decision };
+      eventReceipts:state.event_receipts, provenance:state.provenance, privacyDecision:state.privacy_decision,
+    } : {};
+    const legacyFacts = state && state.source_hash === record.source_hash && Array.isArray(state.tags)
+      && !state.tags.some(tag => !tag || typeof tag.value !== 'string') ? {
+        displayTags:state.tags.map(tag => tag.value),
+        displayTagOrigins:state.tags.map(tag => ({ value:tag.value, origin:tag.origin })),
+        connections:Array.isArray(state.connections) ? state.connections : [],
+      } : { displayTags:rawTags, connections:Array.isArray(record.connections) ? record.connections : [] };
+    const graphFacts = graph.ok && graph.records[record.record_id];
+    const facts = graphFacts && graphFacts.content_hash === record.content_hash ? {
+      displayTags:graphFacts.tags.map(tag => tag.value),
+      displayTagOrigins:graphFacts.tags.map(tag => ({
+        value:tag.value, normalized_key:tag.normalized_key, origin:tag.origin,
+      })),
+      connections:graphFacts.connections,
+      graphCurrent:true,
+    } : legacyFacts;
+    return { ...record, ...facts, ...status };
   });
 }
 
@@ -830,14 +1038,50 @@ async function loadEnrichments(){
   return ENRICH;
 }
 
+function graphCacheKeys(config){
+  const value = key => config && typeof config[key] === 'string' ? config[key] : '';
+  const namespace = [value('owner'), value('repo'), value('branch') || 'main']
+    .map(encodeURIComponent).join(':');
+  return {
+    current:`yz-graph-current:${namespace}`,
+    etag:`yz-graph-current-etag:${namespace}`,
+    at:`yz-graph-current-at:${namespace}`,
+  };
+}
+
+async function loadGraphCurrent(){
+  const cache = graphCacheKeys(cfg);
+  let j;
+  try{
+    j = await gh('graph-current.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
+  }catch(error){
+    const checked = validateGraphCurrent(ls.get(cache.current, null));
+    if(checked.ok){
+      GRAPH = checked.value; graphLoadState = 'cached';
+      await reconcileGraphPending();
+      return GRAPH;
+    }
+    GRAPH = checked.value; graphLoadState = 'unavailable'; return GRAPH;
+  }
+  let checked;
+  try{ checked = validateGraphCurrent(JSON.parse(b64decode(j.content))); }
+  catch(error){ checked = { ok:false, value:{ schema_version:1, projection_sequence:0, nodes:[], contains:[] } }; }
+  if(!checked.ok){ GRAPH = checked.value; graphLoadState = 'incompatible'; return GRAPH; }
+  GRAPH = checked.value; graphLoadState = 'loaded';
+  ls.set(cache.current, GRAPH); ls.set(cache.etag, j.sha || j.etag || ''); ls.set(cache.at, Date.now());
+  await reconcileGraphPending();
+  return GRAPH;
+}
+
 async function loadData(){
   const [recordsResult] = await Promise.allSettled([
-    gh('records.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' }), loadEnrichments()
+    gh('records.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' }), loadEnrichments(),
+    typeof loadGraphCurrent === 'function' ? loadGraphCurrent() : Promise.resolve(null)
   ]);
   if(recordsResult.status !== 'fulfilled') throw recordsResult.reason;
   const d = JSON.parse(b64decode(recordsResult.value.content));
   DATA = d; ls.set(LS.d, d);
-  prepData(); flushEnrichments(false);
+  prepData(); flushEnrichments(false); flushGraphCommands(false);
   return d;
 }
 
@@ -845,6 +1089,12 @@ async function loadData(){
 function newId(){
   const d = new Date(), p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${Math.random().toString(36).slice(2,6)}`;
+}
+function newGraphEventId(){
+  if(!globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') return '';
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `graph-user-${Array.from(bytes, byte => byte.toString(16).padStart(2,'0')).join('')}`;
 }
 function nowLocal(){
   const d = new Date(), p = n => String(n).padStart(2,'0');
@@ -978,6 +1228,121 @@ function currentEnrichmentCatalog(){
   return { records:Array.isArray(ALL) ? ALL : [],
     projects:ENRICH && ENRICH.targets && ENRICH.targets.projects || {} };
 }
+function canonicalizeQueuedGraphCommand(entry, graphCurrent){
+  const fail = reason => ({ ok:false, reason });
+  const checked = validateGraphCurrent(graphCurrent);
+  const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+  const exactKeys = (value, keys) => isObject(value) && Object.keys(value).length === keys.length
+    && Object.keys(value).every(key => keys.includes(key));
+  const safeText = (value, limit) => {
+    const points = typeof value === 'string' ? Array.from(value) : [];
+    return points.length > 0 && points.length <= limit
+      && !points.some(character => /\p{Cc}|\p{Cs}|\p{Zl}|\p{Zp}/u.test(character));
+  };
+  if(!checked.ok || !exactKeys(entry, [
+    'schema_version','event_id','node_id','action','client_created_at','facts',
+  ]) || entry.schema_version !== 1 || !/^graph-user-[0-9a-f]{32}$/.test(entry.event_id)
+     || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(entry.client_created_at)
+     || Number.isNaN(new Date(entry.client_created_at).getTime()) || !Array.isArray(entry.facts)
+     || entry.facts.length !== 1 || !['add_tag','remove_tag','add_link','remove_link'].includes(entry.action))
+    return fail('invalid_event');
+  const nodes = Object.fromEntries(checked.value.nodes.map(node => [node.node_id, node]));
+  const source = nodes[entry.node_id];
+  if(!source || source.kind !== 'record' || source.deleted) return fail('unknown_record');
+  const fact = entry.facts[0];
+  if(entry.action === 'add_tag'){
+    if(!exactKeys(fact, ['kind','raw_display_value']) || fact.kind !== 'tag'
+       || !safeText(fact.raw_display_value, 256) || !fact.raw_display_value.trim()) return fail('invalid_tag');
+    return { ok:true, value:{ ...entry, facts:[{
+      kind:'tag', raw_display_value:fact.raw_display_value,
+    }] } };
+  }
+  if(entry.action === 'remove_tag'){
+    if(!exactKeys(fact, ['kind','normalized_key']) || fact.kind !== 'tag'
+       || !safeText(fact.normalized_key, 80)) return fail('invalid_tag');
+    return { ok:true, value:{ ...entry, facts:[{
+      kind:'tag', normalized_key:fact.normalized_key,
+    }] } };
+  }
+  const optionalReason = entry.action === 'add_link' && Object.prototype.hasOwnProperty.call(fact || {}, 'reason');
+  const linkKeys = optionalReason
+    ? ['kind','target_id','relation','reason'] : ['kind','target_id','relation'];
+  if(!exactKeys(fact, linkKeys) || fact.kind !== 'link'
+     || !/^[A-Za-z0-9._-]{1,128}$/.test(fact.target_id || '') || fact.target_id === entry.node_id
+     || !['related','related_project','previous_note','source_reference'].includes(fact.relation)
+     || (optionalReason && !safeText(fact.reason, 4096))) return fail('invalid_connection');
+  const target = nodes[fact.target_id];
+  const relations = { record:'related', project:'related_project', daily_note:'previous_note', document:'source_reference' };
+  if(!target || target.deleted || !relations[target.kind] || relations[target.kind] !== fact.relation)
+    return fail('unknown_connection');
+  const safeFact = { kind:'link', target_id:fact.target_id, relation:fact.relation };
+  if(optionalReason) safeFact.reason = fact.reason;
+  return { ok:true, value:{ ...entry, facts:[safeFact] } };
+}
+function buildGraphCommand(action, input, graphCurrent){
+  const fail = reason => ({ ok:false, reason });
+  if(!input || typeof input !== 'object' || !input.record || typeof input.record !== 'object')
+    return fail('invalid_event');
+  const base = {
+    schema_version:1, event_id:input.event_id, node_id:input.record.record_id,
+    action, client_created_at:input.client_created_at, facts:[],
+  };
+  if(action === 'add_tag'){
+    const raw = typeof input.raw_display_value === 'string'
+      ? input.raw_display_value : '';
+    base.facts = [{ kind:'tag', raw_display_value:raw }];
+  }else if(action === 'remove_tag'){
+    base.facts = [{ kind:'tag', normalized_key:input.normalized_key }];
+  }else if(action === 'add_link' || action === 'remove_link'){
+    const connection = input.connection || {};
+    base.facts = [{ kind:'link', target_id:connection.target_id, relation:connection.relation }];
+    if(action === 'add_link' && typeof connection.reason === 'string' && connection.reason)
+      base.facts[0].reason = connection.reason;
+  }else return fail('invalid_action');
+  const checked = canonicalizeQueuedGraphCommand(base, graphCurrent);
+  if(!checked.ok) return checked;
+  const graph = validateGraphCurrent(graphCurrent).value;
+  const source = graph.nodes.find(node => node.node_id === base.node_id);
+  if(typeof input.record.content_hash !== 'string' || source.content_hash !== input.record.content_hash)
+    return fail('stale_scope');
+  if(action === 'remove_tag' && !source.tags.some(tag => tag.normalized_key === input.normalized_key))
+    return fail('unknown_tag');
+  if(action === 'remove_link' && !source.links.some(link =>
+    link.target_id === input.connection.target_id && link.relation === input.connection.relation))
+    return fail('unknown_connection');
+  if(action === 'add_link' && source.links.some(link =>
+    link.target_id === input.connection.target_id && link.relation === input.connection.relation))
+    return fail('duplicate_connection');
+  return checked;
+}
+function resolveGraphReceipt(pending, graphCurrent){
+  if(!pending || !/^graph-user-[0-9a-f]{32}$/.test(pending.event_id || ''))
+    return { state:'failed', reason:'invalid_event' };
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { state:'waiting', reason:'' };
+  const receipt = checked.value.event_receipts[pending.event_id];
+  return receipt && receipt.status === 'applied' && receipt.safe_reason === 'applied'
+    ? { state:'applied', reason:'applied' } : { state:'waiting', reason:'' };
+}
+function validateGraphFailureReceipt(value, eventId){
+  const exact = value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === 5
+    && Object.keys(value).every(key => [
+      'byte_size','content_sha256','filename','reason_code','status',
+    ].includes(key));
+  return exact && value.status === 'permanently_invalid'
+    && value.filename === `${eventId}.json` && Number.isInteger(value.byte_size)
+    && value.byte_size >= 0 && value.byte_size <= 256 * 1024
+    && /^[0-9a-f]{64}$/.test(value.content_sha256 || '')
+    && /^[a-z][a-z0-9_]{0,63}$/.test(value.reason_code || '')
+    ? { state:'failed', reason:value.reason_code } : null;
+}
+async function loadGraphFailureReceipt(eventId){
+  try{
+    const response = await gh(`graph/failed/${eventId}.json?ref=${cfg.branch || 'main'}`, { cache:'no-store' });
+    return validateGraphFailureReceipt(JSON.parse(b64decode(response.content)), eventId);
+  }catch(error){ return null; }
+}
 function quarantineEnrichment(entry, reason){
   const safeId = entry && typeof entry.event_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(entry.event_id)
     ? entry.event_id : 'unknown';
@@ -1048,6 +1413,78 @@ function reconcileEnrichmentPending(){
   }
   ls.set(LS.ep, keep);
   ls.set(LS.er, safeResults);
+}
+function quarantineGraph(entry, reason){
+  const eventId = entry && /^graph-user-[0-9a-f]{32}$/.test(entry.event_id || '')
+    ? entry.event_id : 'unknown';
+  const allowed = new Set(['invalid_event','invalid_action','invalid_tag','invalid_connection',
+    'unknown_record','unknown_tag','unknown_connection','duplicate_connection','stale_scope']);
+  const quarantined = ls.get(LS.gx, []);
+  quarantined.push({ event_id:eventId, reason:allowed.has(reason) ? reason : 'invalid_event' });
+  ls.set(LS.gx, quarantined.slice(-100));
+}
+function markGraphPending(payload, transport){
+  const pending = ls.get(LS.gp, {});
+  pending[payload.event_id] = {
+    event_id:payload.event_id, record_id:payload.node_id, action:payload.action,
+    transport:transport === 'offline' ? 'offline' : 'queued',
+  };
+  ls.set(LS.gp, pending);
+  const results = ls.get(LS.gr, {});
+  if(results && typeof results === 'object' && !Array.isArray(results)){
+    delete results[payload.node_id]; ls.set(LS.gr, results);
+  }
+}
+async function flushGraphCommands(loud){
+  const queued = ls.get(LS.gq, []);
+  if(!Array.isArray(queued) || !queued.length) return;
+  const left = [];
+  for(const entry of queued){
+    const checked = canonicalizeQueuedGraphCommand(entry, GRAPH);
+    if(!checked.ok){ quarantineGraph(entry, checked.reason); continue; }
+    try{
+      const payload = await putGraphCommand(checked.value, GRAPH);
+      markGraphPending(payload, 'queued');
+    }catch(error){ left.push(entry); }
+  }
+  ls.set(LS.gq, left);
+  if(loud) toast(left.length ? `${left.length}건 그래프 전송 대기` : '수정 요청 전송', !!left.length);
+}
+function queueGraphCommand(entry){
+  const checked = canonicalizeQueuedGraphCommand(entry, GRAPH);
+  if(!checked.ok){ quarantineGraph(entry, checked.reason); return checked; }
+  const queued = ls.get(LS.gq, []);
+  queued.push(checked.value); ls.set(LS.gq, queued);
+  markGraphPending(checked.value, 'offline');
+  return checked;
+}
+async function submitGraphCommand(action, input){
+  const built = buildGraphCommand(action, input, GRAPH);
+  if(!built.ok) return built;
+  try{
+    const payload = await putGraphCommand(built.value, GRAPH);
+    markGraphPending(payload, 'queued');
+    return { ok:true, value:payload, transport:'queued' };
+  }catch(error){
+    queueGraphCommand(built.value);
+    return { ok:true, value:built.value, transport:'offline' };
+  }
+}
+async function reconcileGraphPending(){
+  const stored = ls.get(LS.gp, {});
+  if(!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+  const keep = {}, results = ls.get(LS.gr, {});
+  const safeResults = results && typeof results === 'object' && !Array.isArray(results) ? results : {};
+  for(const [eventId, pending] of Object.entries(stored)){
+    let result = resolveGraphReceipt({ ...pending, event_id:eventId }, GRAPH);
+    if(result.state === 'waiting') result = await loadGraphFailureReceipt(eventId) || result;
+    if(result.state === 'waiting') keep[eventId] = pending;
+    else if(pending && typeof pending.record_id === 'string') safeResults[pending.record_id] = {
+      event_id:eventId, state:result.state, reason:result.reason,
+    };
+  }
+  ls.set(LS.gp, keep);
+  ls.set(LS.gr, safeResults);
 }
 async function submit(payload, okMsg, uiType = payload.type){
   payload.id = newId();
@@ -1157,6 +1594,11 @@ function enrichmentWarning(state){
   if(state === 'unavailable' || state === 'incompatible') return '자동 분석 상태를 불러오지 못함';
   return '';
 }
+function graphWarning(state){
+  if(state === 'cached') return '태그·연결 정보가 최신이 아닐 수 있음';
+  if(state === 'unavailable' || state === 'incompatible') return '태그·연결 정보를 불러오지 못해 이전 정보로 표시 중';
+  return '';
+}
 function visibleEnrichmentIssue(record){
   const messages = {
     privacy_review_required:'개인정보 확인 필요', retry_wait:'자동 분석 재시도 중', failed:'자동 분석 실패',
@@ -1164,24 +1606,79 @@ function visibleEnrichmentIssue(record){
   const status = record && record.enrichmentStatus;
   return messages[status] ? { status, message:messages[status] } : null;
 }
-function resolveConnection(connection, records, projects){
-  const missing = { label:'대상 없음', href:'' };
+function graphTargetCatalog(graphCurrent, records, projects){
+  const checked = validateGraphCurrent(graphCurrent);
+  if(!checked.ok) return { ok:false, targets:{} };
+  const rawRecords = Object.fromEntries((Array.isArray(records) ? records : [])
+    .filter(record => record && typeof record.record_id === 'string')
+    .map(record => [record.record_id, record]));
+  const projectCatalog = projects && typeof projects === 'object' && !Array.isArray(projects)
+    ? projects : {};
+  const targets = {};
+  for(const node of checked.value.nodes){
+    if(node.deleted || !['record','project','daily_note','document'].includes(node.kind)) continue;
+    if(node.kind === 'record'){
+      const record = rawRecords[node.node_id];
+      const body = record && typeof record.body === 'string' ? record.body.trim() : '';
+      if(!body) continue;
+      const text = [body, record.date, ...((record.displayTags || record.tags) || [])]
+        .filter(value => typeof value === 'string').join(' ');
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'record', label:`[기록] ${body}`, search_text:text,
+      };
+      continue;
+    }
+    if(node.kind === 'project'){
+      const project = projectCatalog[node.node_id];
+      const title = project && typeof project.title === 'string' ? project.title.trim() : '';
+      if(!title) continue;
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'project', label:`[프로젝트] ${title}`, search_text:title,
+      };
+      continue;
+    }
+    if(node.kind === 'daily_note'){
+      const match = /^note-(\d{4}-\d{2}-\d{2})$/.exec(node.node_id);
+      const parsed = match ? new Date(`${match[1]}T00:00:00Z`) : null;
+      if(!match || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0,10) !== match[1]) continue;
+      targets[node.node_id] = {
+        node_id:node.node_id, kind:'daily_note', label:`[하루 기록] ${match[1]}`, search_text:match[1],
+      };
+      continue;
+    }
+    targets[node.node_id] = {
+      node_id:node.node_id, kind:'document', label:`[문서] ${node.node_id}`, search_text:'',
+    };
+  }
+  return { ok:true, targets };
+}
+function resolveConnection(connection, records, projects, graphCurrent){
+  const missing = { kind:'', label:'대상 없음', href:'' };
   if(!connection || typeof connection !== 'object') return missing;
+  const graph = graphTargetCatalog(graphCurrent, records, projects);
+  if(graph.ok){
+    const target = graph.targets[connection.target_id];
+    if(!target || target.kind !== connection.kind) return missing;
+    return {
+      kind:target.kind, label:target.label,
+      href:target.kind === 'record' ? `#record-${target.node_id}` : '',
+    };
+  }
   if(connection.kind === 'record'){
     const target = (Array.isArray(records) ? records : []).find(record => record && record.record_id === connection.target_id);
     const label = target && typeof target.body === 'string' && target.body.trim();
-    return label ? { label, href:`#record-${connection.target_id}` } : missing;
+    return label ? { kind:'record', label:`[기록] ${label}`, href:`#record-${connection.target_id}` } : missing;
   }
   if(connection.kind === 'project'){
     const target = projects && typeof projects === 'object' ? projects[connection.target_id] : null;
     const label = target && typeof target.title === 'string' && target.title.trim();
-    return label ? { label, href:'' } : missing;
+    return label ? { kind:'project', label:`[프로젝트] ${label}`, href:'' } : missing;
   }
   return missing;
 }
-function resolveConnections(connections, records, projects){
+function resolveConnections(connections, records, projects, graphCurrent){
   return (Array.isArray(connections) ? connections : []).map(connection =>
-    resolveConnection(connection, records, projects));
+    resolveConnection(connection, records, projects, graphCurrent));
 }
 function recordSearchText(record){
   return [record && record.body, ...((record && record.displayTags) || []), ...((record && record.detail) || []),
@@ -1204,14 +1701,23 @@ function toggleCardDetails(open){
   const next = !open;
   return { open:next, expanded:String(next), hidden:!next };
 }
-/* A decision belongs to the exact content and redaction revision it was made for.
+/* A decision belongs to the exact source-or-content and redaction revision it was made for.
    Keeping the scope in the projected sidecar lets an old permission disappear rather
    than silently applying to a changed record. */
 function privacyDecisionIsCurrent(decision, record){
-  return !!(decision && record && typeof decision === 'object'
-    && ['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
-    && decision.source_hash === record.source_hash
-    && decision.redaction_version === record.redaction_version);
+  if(!decision || !record || typeof decision !== 'object' || typeof record !== 'object'
+     || !['allow_redacted','allow_original','skip_enrichment'].includes(decision.action)
+     || !Number.isInteger(decision.redaction_version) || decision.redaction_version < 1
+     || decision.redaction_version !== record.redaction_version) return false;
+  const hasSourceScope = Object.prototype.hasOwnProperty.call(decision, 'source_hash');
+  const hasContentScope = Object.prototype.hasOwnProperty.call(decision, 'content_hash');
+  if(hasSourceScope === hasContentScope) return false;
+  const scopeKey = hasSourceScope ? 'source_hash' : 'content_hash';
+  const scopeHash = decision[scopeKey];
+  return Object.keys(decision).length === 3
+    && Object.keys(decision).every(key => ['action',scopeKey,'redaction_version'].includes(key))
+    && typeof scopeHash === 'string' && /^sha256-[0-9a-f]{64}$/.test(scopeHash)
+    && scopeHash === record[scopeKey];
 }
 function enrichmentResultForRecord(recordId){
   const results = ls.get(LS.er, {}), result = results && results[recordId];
@@ -1220,62 +1726,99 @@ function enrichmentResultForRecord(recordId){
      || typeof result.reason !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(result.reason)) return '';
   return result.state === 'applied' ? '반영됨' : enrichmentRejectionLabel(result.reason);
 }
+function graphResultForRecord(recordId){
+  const results = ls.get(LS.gr, {}), result = results && results[recordId];
+  if(!result || typeof result !== 'object' || !/^graph-user-[0-9a-f]{32}$/.test(result.event_id || '')
+     || !['applied','failed'].includes(result.state)
+     || typeof result.reason !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(result.reason)) return '';
+  return result.state === 'applied' ? '반영됨' : '반영 실패';
+}
+function graphPendingForRecord(recordId){
+  const pending = ls.get(LS.gp, {});
+  if(!pending || typeof pending !== 'object' || Array.isArray(pending)) return '';
+  let queued = false;
+  for(const [eventId, item] of Object.entries(pending)){
+    if(!/^graph-user-[0-9a-f]{32}$/.test(eventId) || !item || typeof item !== 'object'
+       || Array.isArray(item) || item.event_id !== eventId || item.record_id !== recordId
+       || !['add_tag','remove_tag','add_link','remove_link'].includes(item.action)
+       || !['queued','offline'].includes(item.transport)) continue;
+    if(item.transport === 'offline') return '오프라인 — 전송 대기';
+    queued = true;
+  }
+  return queued ? '수정 요청 반영 대기' : '';
+}
 function enrichmentControlState(record, sidecarState){
   const validId = record && typeof record.record_id === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(record.record_id);
   const validHash = record && typeof record.source_hash === 'string' && /^sha256-[0-9a-f]{64}$/.test(record.source_hash);
   const validVersion = record && Number.isInteger(record.redaction_version) && record.redaction_version > 0;
-  const enabled = !!(validId && validHash && validVersion && ['loaded','cached'].includes(sidecarState));
   const privacy = record && record.enrichmentStatus === 'privacy_review_required';
+  const currentGraphState = typeof graphLoadState === 'string' ? graphLoadState : 'loaded';
+  const enabled = privacy
+    ? !!(validId && validHash && validVersion && ['loaded','cached'].includes(sidecarState))
+    : !!(validId && record && record.graphCurrent && ['loaded','cached'].includes(currentGraphState));
   return {
     enabled, mode:privacy ? 'privacy' : 'normal',
     actions:privacy ? ['allow_redacted','allow_original','skip_enrichment']
-      : ['add_tag','remove_tag','add_connection','remove_connection'],
-    tagSlots:Math.max(0, 3 - (Array.isArray(record && record.displayTags) ? record.displayTags.length : 0)),
-    connectionSlots:Math.max(0, 3 - (Array.isArray(record && record.connections) ? record.connections.length : 0)),
+      : ['add_tag','remove_tag','add_link','remove_link'],
   };
 }
 function recordTokenSet(record){
   return new Set(([record && record.body, ...((record && record.displayTags) || [])].filter(value => typeof value === 'string').join(' ')
     .normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []));
 }
-function rankConnectionCandidates(record, records, enrichments){
-  const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
-  const catalogRecords = Array.isArray(records) ? records : [];
+function connectionCandidates(record, records, enrichments, graphCurrent){
+  const projects = enrichments && enrichments.targets
+    && enrichments.targets.projects && typeof enrichments.targets.projects === 'object'
+    ? enrichments.targets.projects : {};
+  const currentGraph = graphCurrent === undefined && typeof GRAPH !== 'undefined' ? GRAPH : graphCurrent;
+  const catalog = graphTargetCatalog(currentGraph, records, projects);
+  if(!catalog.ok) return [];
   const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
     .filter(connection => connection && typeof connection === 'object')
     .map(connection => `${connection.kind}:${connection.target_id}`));
-  const source = recordTokenSet(record), candidates = [];
-  const add = (kind, targetId, label, target, date) => {
-    if(!/^[A-Za-z0-9._-]{1,128}$/.test(targetId) || (kind === 'record' && targetId === record.record_id) || used.has(`${kind}:${targetId}`)) return;
-    const tokens = kind === 'project'
-      ? new Set(String(label || '').normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []) : recordTokenSet(target);
-    const score = [...source].filter(token => tokens.has(token)).length;
-    if(score) candidates.push({ kind, target_id:targetId, label:label || targetId, score,
-      date:kind === 'record' ? recordDate(target).getTime() : 0 });
-  };
-  for(const target of catalogRecords) add('record', target && target.record_id, target && (target.title || target.body), target, target && target.date);
-  for(const [targetId, target] of Object.entries(targets.projects && typeof targets.projects === 'object' ? targets.projects : {}))
-    add('project', targetId, target && target.title, target, '');
+  const order = { record:0, project:1, daily_note:2 };
+  return Object.values(catalog.targets)
+    .filter(target => target.kind in order && target.node_id !== record.record_id
+      && !used.has(`${target.kind}:${target.node_id}`))
+    .map(target => ({
+      kind:target.kind, target_id:target.node_id, label:target.label,
+      search_text:target.search_text,
+    }))
+    .sort((a,b) => order[a.kind]-order[b.kind] || a.target_id.localeCompare(b.target_id));
+}
+function rankConnectionCandidates(record, records, enrichments, graphCurrent){
+  const source = recordTokenSet(record), recordById = Object.fromEntries(
+    (Array.isArray(records) ? records : []).filter(item => item && typeof item.record_id === 'string')
+      .map(item => [item.record_id, item]),
+  );
+  const candidates = [];
+  for(const candidate of connectionCandidates(record, records, enrichments, graphCurrent)){
+    const target = candidate.kind === 'record' ? recordById[candidate.target_id] : null;
+    const tokens = candidate.kind === 'record' ? recordTokenSet(target)
+      : new Set(candidate.search_text.normalize('NFKC').toLowerCase().match(/[0-9a-z가-힣]+/g) || []);
+    const score = candidate.kind === 'daily_note'
+      ? Number(record && record.date === candidate.search_text)
+      : [...source].filter(token => tokens.has(token)).length;
+    if(score) candidates.push({ ...candidate, score,
+      date:candidate.kind === 'record' ? recordDate(target).getTime() : 0 });
+  }
   return candidates.sort((a,b) => b.score-a.score || b.date-a.date || a.target_id.localeCompare(b.target_id)).slice(0,10);
 }
-function connectionCandidates(record, enrichments){
-  const targets = enrichments && enrichments.targets && typeof enrichments.targets === 'object' ? enrichments.targets : {};
-  const used = new Set((Array.isArray(record && record.connections) ? record.connections : [])
-    .filter(connection => connection && typeof connection === 'object').map(connection => `${connection.kind}:${connection.target_id}`));
-  const candidates = [];
-  for(const [kind, entries] of [['record', targets.records || {}], ['project', targets.projects || {}]]){
-    for(const [target_id, target] of Object.entries(entries)){
-      if((kind === 'record' && target_id === record.record_id) || used.has(`${kind}:${target_id}`)) continue;
-      candidates.push({ kind, target_id, label:(target && target.title) || target_id });
-    }
-  }
-  return candidates;
+function searchConnectionCandidates(record, query, records, enrichments, graphCurrent){
+  const normalized = typeof query === 'string' ? query.trim().normalize('NFKC').toLowerCase() : '';
+  if(!normalized) return [];
+  return connectionCandidates(record, records, enrichments, graphCurrent).filter(candidate => {
+    if(candidate.kind === 'daily_note' && normalized !== candidate.search_text.toLowerCase()) return false;
+    return candidate.search_text.normalize('NFKC').toLowerCase().includes(normalized);
+  }).slice(0,20);
 }
 function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='main'){
   const state = enrichmentControlState(record, sidecarState);
   if(!state.enabled) return '';
   const id = record.record_id;
-  const priorResult = enrichmentResultForRecord(id);
+  const priorResult = state.mode === 'privacy'
+    ? enrichmentResultForRecord(id)
+    : (graphPendingForRecord(id) || graphResultForRecord(id) || enrichmentResultForRecord(id));
   if(state.mode === 'privacy') return `<section class="enrich-controls" aria-label="개인정보 분석 선택">
     <h4>개인정보가 포함될 수 있습니다</h4><p>원문 전송은 한 번 더 확인합니다.</p>
     <div class="row"><button type="button" class="primary" data-upload-control data-enrich-action="allow_redacted">가린 내용으로 허용</button>
@@ -1283,26 +1826,30 @@ function renderEnrichmentControls(record, sidecarState, enrichments, viewKey='ma
     <button type="button" data-upload-control data-enrich-action="skip_enrichment">분석 제외</button></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
   const tags = Array.isArray(record.displayTags) ? record.displayTags : [];
+  const tagFacts = Array.isArray(record.displayTagOrigins) ? record.displayTagOrigins : [];
   const connections = Array.isArray(record.connections) ? record.connections : [];
-  const tagDisabled = state.tagSlots === 0;
-  const connectionDisabled = state.connectionSlots === 0;
+  const typeLabels = { record:'기록', project:'프로젝트', daily_note:'하루 기록', document:'문서' };
+  const connectionLabels = connections.map((connection, index) => {
+    const related = Array.isArray(record.relatedItems) ? record.relatedItems[index] : null;
+    return related && typeof related.label === 'string' && related.label
+      ? related.label : `[${typeLabels[connection && connection.kind] || '연결'}] 대상 없음`;
+  });
   if(!['completed','retry_wait','failed','skipped'].includes(record.enrichmentStatus)) return '';
   return `<section class="enrich-controls" aria-label="기록 수정">
-    <h4>수정</h4><p>태그과 연결은 각각 최대 3개까지 반영 요청할 수 있습니다.</p>
-    ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map(tag =>
-      `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-enrich-tag="${esc(tag)}" aria-label="${esc(tag)} 태그 삭제">×</button></span>`).join('')}</div>` : ''}
-    <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="80"${tagDisabled ? ' data-limit-disabled disabled' : ''}>
-    <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag"${tagDisabled ? ' data-limit-disabled disabled' : ''}>태그 추가</button></div>
-    ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map(connection =>
-      `<span>${esc(connection.kind)} <button type="button" data-upload-control data-enrich-action="remove_connection" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
+    <h4>수정</h4><p>태그와 연결 수정은 반영이 확인될 때까지 대기 상태로 표시됩니다.</p>
+    ${tags.length ? `<div class="compact-list" aria-label="현재 태그">${tags.map((tag, index) =>
+      `<span>#${esc(tag)} <button type="button" data-upload-control data-enrich-action="remove_tag" data-graph-normalized-key="${esc(tagFacts[index] && tagFacts[index].normalized_key || '')}" aria-label="${esc(tag)} 태그 삭제"${tagFacts[index] && tagFacts[index].normalized_key ? '' : ' disabled'}>×</button></span>`).join('')}</div>` : ''}
+    <label for="enrich-tag-${esc(viewKey)}-${esc(id)}">태그 추가</label><div class="row"><input id="enrich-tag-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-tag-input aria-label="태그 추가" maxlength="256">
+    <button type="button" data-upload-control data-enrich-add-tag data-enrich-action="add_tag">태그 추가</button></div>
+    ${connections.length ? `<div class="compact-list" aria-label="현재 연결">${connections.map((connection, index) =>
+      `<span>${esc(connectionLabels[index])} <button type="button" data-upload-control data-enrich-action="remove_link" data-enrich-kind="${esc(connection.kind)}" data-enrich-target-id="${esc(connection.target_id)}" data-graph-relation="${esc(connection.relation)}" aria-label="연결 삭제">×</button></span>`).join('')}</div>` : ''}
     <label>추천 연결</label><div class="enrich-search-results" data-enrich-recommendations></div>
-    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록 또는 프로젝트 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록 또는 프로젝트 검색" maxlength="80"${connectionDisabled ? ' data-limit-disabled disabled' : ''}><div class="enrich-search-results" data-enrich-search-results></div>
+    <label for="enrich-connection-search-${esc(viewKey)}-${esc(id)}">기록·프로젝트·하루 기록 검색</label><input id="enrich-connection-search-${esc(viewKey)}-${esc(id)}" data-upload-control data-enrich-connection-search aria-label="기록·프로젝트·하루 기록 검색" maxlength="80"><div class="enrich-search-results" data-enrich-search-results></div>
     <div class="enrich-feedback" role="status" aria-live="polite">${esc(priorResult)}</div></section>`;
 }
 function renderConnectionRecommendations(record, enrichments){
-  const candidates = rankConnectionCandidates(record, ALL, enrichments);
-  const full = (record.connections || []).length >= 3;
-  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}"${full ? ' data-limit-disabled disabled' : ''}>${esc(candidate.label)} <small>${candidate.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
+  const candidates = rankConnectionCandidates(record, ALL, enrichments, GRAPH);
+  return candidates.map(candidate => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(candidate.kind)}" data-enrich-target-id="${esc(candidate.target_id)}">${esc(candidate.label)}</button>`).join('') || '<span class="none">추천 연결이 없습니다</span>';
 }
 function renderEnrichmentIssue(record){
   const issue = visibleEnrichmentIssue(record);
@@ -1320,9 +1867,9 @@ function renderRecordMetadata(record, viewKey='main'){
   const metadataId = recordMetadataDomId(record, viewKey);
   return `<section id="${esc(metadataId)}" class="record-metadata" data-card-metadata hidden aria-label="분류·관계 메타데이터"><h4 class="metadata-title">분류·관계 메타데이터</h4>
     ${tags.length ? `<div class="metadata-row"><span class="metadata-label">태그</span><div class="metadata-values">${tags.map(tag => `<span class="metadata-chip">#${esc(tag)}</span>`).join('')}</div></div>` : ''}
-    ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
+    ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.kind === 'record' && item.href
       ? `<button type="button" class="metadata-chip" data-focus-record="${esc(item.connection.target_id)}" aria-label="연결된 기록 ${esc(item.label)} 열기">🔗 ${esc(item.label)}</button>`
-      : `<span class="metadata-chip project">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
+      : `<span class="metadata-chip ${esc(item.kind || 'missing')}">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
   </section>`;
 }
 function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main'){
@@ -1337,9 +1884,10 @@ function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main
 function prepData(){
   const sourceRecords = Array.isArray(DATA.records) ? DATA.records : [];
   const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects;
-  ALL = composeRecords(sourceRecords, ENRICH).map((r, order) => {
+  const graphCurrent = typeof GRAPH === 'undefined' ? null : GRAPH;
+  ALL = composeRecords(sourceRecords, ENRICH, graphCurrent).map((r, order) => {
     const _d = recordDate(r);
-    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects),
+    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects, graphCurrent),
       _d, _at:recordSavedAt(r, _d), _order:order};
   }).sort((a,b) => b._at - a._at || a._order - b._order);
 }
@@ -1491,13 +2039,18 @@ async function submitCardEnrichment(cardElement, trigger){
     return;
   }
   if(action === 'allow_original' && !window.confirm('원문을 분석 도구에 보내도록 허용할까요?')) return;
-  const input = { event_id:newId(), client_created_at:new Date().toISOString(), record };
-  if(action === 'add_tag') input.tag = cardElement.querySelector('[data-enrich-tag-input]').value;
-  if(action === 'remove_tag') input.tag = trigger.dataset.enrichTag;
-  if(action === 'remove_connection') input.connection = {
-    kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId
+  const graphAction = ['add_tag','remove_tag','add_link','remove_link'].includes(action);
+  const input = {
+    event_id:graphAction ? newGraphEventId() : newId(),
+    client_created_at:new Date().toISOString(), record,
   };
-  if(action === 'add_connection'){
+  if(action === 'add_tag') input.raw_display_value = cardElement.querySelector('[data-enrich-tag-input]').value;
+  if(action === 'remove_tag') input.normalized_key = trigger.dataset.graphNormalizedKey;
+  if(action === 'remove_link') input.connection = {
+    kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId,
+    relation:trigger.dataset.graphRelation,
+  };
+  if(action === 'add_link'){
     if(trigger.dataset.enrichKind && trigger.dataset.enrichTargetId){
       input.connection = { kind:trigger.dataset.enrichKind, target_id:trigger.dataset.enrichTargetId };
     }else{
@@ -1505,12 +2058,16 @@ async function submitCardEnrichment(cardElement, trigger){
       const [kind, targetId] = (selectedControl ? selectedControl.value : '').split(':', 2);
       input.connection = { kind, target_id:targetId };
     }
+    const relations = { record:'related', project:'related_project', daily_note:'previous_note', document:'source_reference' };
+    input.connection.relation = relations[input.connection.kind];
   }
   setEnrichmentUploadState(cardElement, true);
   try{
-    const result = await submitEnrichmentEvent(action, input);
+    const result = graphAction
+      ? await submitGraphCommand(action, input) : await submitEnrichmentEvent(action, input);
     if(feedback) feedback.textContent = result.ok
-      ? (result.transport === 'offline' ? '오프라인 — 전송 대기' : '보강 요청 전송 대기')
+      ? (result.transport === 'offline' ? '오프라인 — 전송 대기'
+        : graphAction ? '수정 요청 반영 대기' : '보강 요청 전송 대기')
       : '요청을 보낼 수 없습니다.';
   }finally{
     setEnrichmentUploadState(cardElement, false);
@@ -1562,16 +2119,10 @@ function bind(el){
     if(search) search.oninput = () => {
       const results = c.querySelector('[data-enrich-search-results]');
       const record = ALL.find(item => item && item.record_id === c.dataset.recordId);
-      const query = search.value.trim().toLowerCase();
+      const query = search.value.trim();
       if(!results || !record || !query) { if(results) results.innerHTML = ''; return; }
-      const used = new Set((record.connections || []).map(item => `${item.kind}:${item.target_id}`));
-      const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects || {};
-      const candidates = [
-        ...ALL.map(item => ({ kind:'record', target_id:item.record_id, label:item.body || '', text:`${item.body || ''} ${(item.displayTags || []).join(' ')}` })),
-        ...Object.entries(projects).map(([target_id, item]) => ({ kind:'project', target_id, label:item.title || target_id, text:item.title || '' })),
-      ].filter(item => item.target_id && !(item.kind === 'record' && item.target_id === record.record_id)
-        && !used.has(`${item.kind}:${item.target_id}`) && item.text.toLowerCase().includes(query)).slice(0,20);
-      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_connection" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)} <small>${item.kind === 'record' ? '기록' : '프로젝트'}</small></button>`).join('');
+      const candidates = searchConnectionCandidates(record, query, ALL, ENRICH, GRAPH);
+      results.innerHTML = candidates.map(item => `<button type="button" class="enrich-search-result" data-upload-control data-enrich-action="add_link" data-enrich-kind="${esc(item.kind)}" data-enrich-target-id="${esc(item.target_id)}">${esc(item.label)}</button>`).join('');
       results.querySelectorAll('[data-enrich-action]').forEach(button => { button.onclick = event => { event.preventDefault(); submitCardEnrichment(c, button); }; });
     };
   });
@@ -1638,7 +2189,7 @@ function renderStatus(){
 function renderView(){
   prepData(); renderPlan(); renderQuestions(); renderTimeuse();
   renderStats(); renderList(); renderSub(); renderStatus();
-  const warning = enrichmentWarning(enrichmentLoadState);
+  const warning = [enrichmentWarning(enrichmentLoadState), graphWarning(graphLoadState)].filter(Boolean).join(' · ');
   $('enrichment-notice').hidden = !warning;
   $('enrichment-notice').textContent = warning;
   $('built').textContent = DATA.built ? `${ALL.length}건 · ${DATA.built} 기준` : '';
@@ -1714,7 +2265,9 @@ $('reset').onclick = () => {
   renderTypes(); syncFields(); renderRecent(); renderQueue();
   flush(false);
   loadProjects(false);
-  window.addEventListener('online', () => { flush(true); flushEnrichments(true); loadProjects(true); });
+  window.addEventListener('online', () => {
+    flush(true); flushEnrichments(true); flushGraphCommands(true); loadProjects(true);
+  });
 
   // 딥링크: ?m=morning | night | view  (텔레그램 알림이 이 주소로 보냅니다)
   const m = new URLSearchParams(location.search).get('m');
