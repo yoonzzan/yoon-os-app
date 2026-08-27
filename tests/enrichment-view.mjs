@@ -1133,6 +1133,7 @@ const candidateSource = {
 const candidateRecordId = canonicalProjection.scenarios.auto_only.record_id;
 const candidateRecords = [candidateSource, {
   record_id:candidateRecordId, body:'후보 기록', date:'2026-08-22',
+  detail:['private-detail-keyword'], url:'https://example.test/private-url-keyword',
 }];
 const candidateEnrichments = {
   targets:{ records:{}, projects:{ [typedScenarioForView.target_ids.project]:{ title:'생활 OS' } } },
@@ -1154,6 +1155,12 @@ assert.deepEqual(controlContracts.searchConnectionCandidates(
   canonicalProjection.graph_current,
 ).filter(candidate => candidate.kind === 'daily_note'), [],
   'a broad query never lists every Daily Note date');
+for(const privateQuery of ['private-detail-keyword', 'private-url-keyword']){
+  assert.deepEqual(controlContracts.searchConnectionCandidates(
+    candidateSource, privateQuery, candidateRecords, candidateEnrichments,
+    canonicalProjection.graph_current,
+  ), [], 'record detail and URL text never become connection-search tokens');
+}
 const deletedDailyGraph = structuredClone(canonicalProjection.graph_current);
 deletedDailyGraph.nodes.find(node => node.node_id === typedScenarioForView.target_ids.daily_note).deleted = true;
 assert.deepEqual(controlContracts.searchConnectionCandidates(
@@ -1291,9 +1298,9 @@ assert.deepEqual(ranked.map(candidate => `${candidate.kind}:${candidate.target_i
   `daily_note:${typedScenarioForView.target_ids.daily_note}`,
 ], 'recommendations use graph targets, NFKC common-token score, and relevant Daily Note dates');
 const typedMetadata = cardContracts.renderRecordMetadata({ ...editableRecord, relatedItems:[
-  { label:'[기록] 관련 기록', href:'#record-rec-b' },
-  { label:'[프로젝트] 생활 OS', href:'' },
-  { label:'[하루 기록] 2026-08-23', href:'' },
+  { kind:'record', label:'[기록] 관련 기록', href:'#record-rec-b' },
+  { kind:'project', label:'[프로젝트] 생활 OS', href:'' },
+  { kind:'daily_note', label:'[하루 기록] 2026-08-23', href:'' },
 ], connections:[
   { kind:'record', target_id:'rec-b' }, { kind:'project', target_id:'project-a' },
   { kind:'daily_note', target_id:'note-2026-08-23' },
@@ -1304,6 +1311,12 @@ assert.equal((typedMetadata.match(/data-focus-record=/g) || []).length, 1,
   'only record connections expose in-app card navigation');
 assert.match(typedMetadata, /\[프로젝트\] 생활 OS[\s\S]*\[하루 기록\] 2026-08-23/,
   'project and Daily Note connections remain typed non-navigation chips');
+const missingRecordMetadata = cardContracts.renderRecordMetadata({ ...editableRecord,
+  relatedItems:[{ kind:'', label:'대상 없음', href:'' }],
+  connections:[{ kind:'record', target_id:'gone' }],
+});
+assert.doesNotMatch(missingRecordMetadata, /data-focus-record/,
+  'a graph-rejected record-shaped connection cannot regain navigation from its raw kind');
 assert.match(html, /metadata-connections \.metadata-values\{[^}]*flex-wrap:nowrap[^}]*overflow:hidden/,
   'connection metadata is constrained to a single visible line');
 assert.match(html, /html\{-webkit-text-size-adjust:100%;text-size-adjust:100%\}/,

@@ -1621,7 +1621,7 @@ function graphTargetCatalog(graphCurrent, records, projects){
       const record = rawRecords[node.node_id];
       const body = record && typeof record.body === 'string' ? record.body.trim() : '';
       if(!body) continue;
-      const text = [body, record.date, ...((record.displayTags || record.tags) || []), ...(record.detail || [])]
+      const text = [body, record.date, ...((record.displayTags || record.tags) || [])]
         .filter(value => typeof value === 'string').join(' ');
       targets[node.node_id] = {
         node_id:node.node_id, kind:'record', label:`[기록] ${body}`, search_text:text,
@@ -1867,9 +1867,9 @@ function renderRecordMetadata(record, viewKey='main'){
   const metadataId = recordMetadataDomId(record, viewKey);
   return `<section id="${esc(metadataId)}" class="record-metadata" data-card-metadata hidden aria-label="분류·관계 메타데이터"><h4 class="metadata-title">분류·관계 메타데이터</h4>
     ${tags.length ? `<div class="metadata-row"><span class="metadata-label">태그</span><div class="metadata-values">${tags.map(tag => `<span class="metadata-chip">#${esc(tag)}</span>`).join('')}</div></div>` : ''}
-    ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.connection && item.connection.kind === 'record'
+    ${related.length ? `<div class="metadata-row metadata-connections"><span class="metadata-label">연결</span><div class="metadata-values">${related.map(item => item.kind === 'record' && item.href
       ? `<button type="button" class="metadata-chip" data-focus-record="${esc(item.connection.target_id)}" aria-label="연결된 기록 ${esc(item.label)} 열기">🔗 ${esc(item.label)}</button>`
-      : `<span class="metadata-chip ${esc(item.connection && item.connection.kind || 'project')}">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
+      : `<span class="metadata-chip ${esc(item.kind || 'missing')}">${esc(item.label)}</span>`).join('')}</div></div>` : ''}
   </section>`;
 }
 function renderEnrichmentEditor(record, sidecarState, enrichments, viewKey='main'){
