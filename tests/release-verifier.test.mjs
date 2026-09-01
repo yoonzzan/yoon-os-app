@@ -29,7 +29,7 @@ function dependencies(overrides = {}) {
   return {
     run: cleanGit(),
     remoteMain: () => SHA,
-    pagesBuild: () => ({ commit: SHA, status: 'built' }),
+    pagesDeployment: () => 'succeed',
     httpStatus: () => 200,
     ...overrides,
   };
@@ -47,10 +47,10 @@ test('derives a public GitHub Pages project URL from the origin remote', () => {
 
 test('reports success only when all release identities and the public URL agree', () => {
   let remoteMainCalls = 0;
-  let pagesBuildCalls = 0;
+  let pagesDeploymentCalls = 0;
   const result = verifyRelease(dependencies({
     remoteMain: () => { remoteMainCalls += 1; return SHA; },
-    pagesBuild: () => { pagesBuildCalls += 1; return { commit: SHA, status: 'built' }; },
+    pagesDeployment: () => { pagesDeploymentCalls += 1; return 'succeed'; },
   }));
   assert.deepEqual(result, {
     ok: true,
@@ -61,7 +61,7 @@ test('reports success only when all release identities and the public URL agree'
     },
   });
   assert.equal(remoteMainCalls, 2, 'GitHub main must be read before and after the URL check');
-  assert.equal(pagesBuildCalls, 2, 'GitHub Pages build must be read before and after the URL check');
+  assert.equal(pagesDeploymentCalls, 2, 'GitHub Pages deployment must be read before and after the URL check');
 });
 
 test('rejects a dirty worktree before querying external services', () => {
@@ -86,11 +86,10 @@ test('rejects a branch that is not main or does not track origin/main', () => {
   }
 });
 
-test('rejects local, cached remote, actual remote, and Pages commit disagreement', () => {
+test('rejects local, cached remote, and actual remote commit disagreement', () => {
   for (const overrides of [
     { run: cleanGit({ remoteHead: OTHER_SHA }) },
     { remoteMain: () => OTHER_SHA },
-    { pagesBuild: () => ({ commit: OTHER_SHA, status: 'built' }) },
   ]) {
     const result = verifyRelease(dependencies(overrides));
     assert.equal(result.ok, false);
@@ -98,19 +97,19 @@ test('rejects local, cached remote, actual remote, and Pages commit disagreement
   }
 });
 
-test('rejects a legacy Pages build that is not built', () => {
-  const result = verifyRelease(dependencies({ pagesBuild: () => ({ commit: SHA, status: 'building' }) }));
+test('rejects a Pages deployment that has not succeeded', () => {
+  const result = verifyRelease(dependencies({ pagesDeployment: () => 'pending' }));
   assert.deepEqual(result, {
     ok: false,
-    reason: 'GitHub Pages latest build status is building, expected built',
-    details: { pagesStatus: 'building' },
+    reason: 'GitHub Pages deployment status is pending, expected succeed',
+    details: { pagesStatus: 'pending' },
   });
 });
 
 test('reports unavailable remote, Pages, and curl boundaries without leaking command output', () => {
   for (const overrides of [
     { remoteMain: () => { throw new Error('gh: command not found: secret-value'); } },
-    { pagesBuild: () => { throw new Error('gh: command not found: secret-value'); } },
+    { pagesDeployment: () => { throw new Error('gh: command not found: secret-value'); } },
     { httpStatus: () => { throw new Error('curl: command not found: secret-value'); } },
   ]) {
     const result = verifyRelease(dependencies(overrides));
@@ -139,12 +138,10 @@ test('rejects a repository state that changes while external checks run', () => 
   });
 });
 
-test('rejects GitHub ref or Pages build changes observed after the URL check', () => {
+test('rejects GitHub ref or Pages deployment changes observed after the URL check', () => {
   for (const overrides of [
     { remoteMain: (() => { let calls = 0; return () => (++calls === 1 ? SHA : OTHER_SHA); })() },
-    { pagesBuild: (() => { let calls = 0; return () => (++calls === 1
-      ? { commit: SHA, status: 'built' }
-      : { commit: OTHER_SHA, status: 'built' }); })() },
+    { pagesDeployment: (() => { let calls = 0; return () => (++calls === 1 ? 'succeed' : 'pending'); })() },
   ]) {
     const result = verifyRelease(dependencies(overrides));
     assert.deepEqual(result, {

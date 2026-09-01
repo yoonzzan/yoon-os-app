@@ -52,15 +52,15 @@ function defaultRemoteMain(repository) {
   return sha;
 }
 
-function defaultPagesBuild(repository) {
+function defaultPagesDeployment(repository, commit) {
   const body = commandOutput('gh', [
-    'api', `repos/${repository.owner}/${repository.repo}/pages/builds/latest`,
+    'api', `repos/${repository.owner}/${repository.repo}/pages/deployments/${commit}`,
   ]);
-  const build = JSON.parse(body);
-  if (typeof build.commit !== 'string' || typeof build.status !== 'string') {
-    throw new Error('latest GitHub Pages build response is invalid');
+  const deployment = JSON.parse(body);
+  if (typeof deployment.status !== 'string') {
+    throw new Error('GitHub Pages deployment response is invalid');
   }
-  return { commit: build.commit, status: build.status };
+  return deployment.status;
 }
 
 function defaultHttpStatus(url) {
@@ -100,7 +100,7 @@ function sameSnapshot(first, second) {
 export function verifyRelease({
   run = commandOutput,
   remoteMain = defaultRemoteMain,
-  pagesBuild = defaultPagesBuild,
+  pagesDeployment = defaultPagesDeployment,
   httpStatus = defaultHttpStatus,
 } = {}) {
   let local;
@@ -119,10 +119,10 @@ export function verifyRelease({
   }
 
   let actualRemoteMain;
-  let latestPagesBuild;
+  let pagesStatus;
   try {
     actualRemoteMain = remoteMain(local.repository);
-    latestPagesBuild = pagesBuild(local.repository);
+    pagesStatus = pagesDeployment(local.repository, local.head);
   } catch {
     return failure('GitHub lookup failed (gh unavailable, network failed, or response invalid)');
   }
@@ -134,17 +134,12 @@ export function verifyRelease({
       head: local.head, actualRemoteMain,
     });
   }
-  if (!latestPagesBuild || typeof latestPagesBuild.commit !== 'string' || typeof latestPagesBuild.status !== 'string') {
-    return failure('GitHub Pages lookup failed (latest build response is invalid)');
+  if (typeof pagesStatus !== 'string') {
+    return failure('GitHub Pages lookup failed (deployment response is invalid)');
   }
-  if (latestPagesBuild.status !== 'built') {
-    return failure(`GitHub Pages latest build status is ${latestPagesBuild.status}, expected built`, {
-      pagesStatus: latestPagesBuild.status,
-    });
-  }
-  if (latestPagesBuild.commit !== local.head) {
-    return failure('commit mismatch: GitHub Pages latest built commit does not equal local HEAD', {
-      head: local.head, pagesCommit: latestPagesBuild.commit,
+  if (pagesStatus !== 'succeed') {
+    return failure(`GitHub Pages deployment status is ${pagesStatus}, expected succeed`, {
+      pagesStatus,
     });
   }
 
@@ -158,20 +153,19 @@ export function verifyRelease({
   if (status !== 200) return failure(`public URL returned HTTP ${status}`, { url });
 
   let finalRemoteMain;
-  let finalPagesBuild;
+  let finalPagesStatus;
   try {
     finalRemoteMain = remoteMain(local.repository);
-    finalPagesBuild = pagesBuild(local.repository);
+    finalPagesStatus = pagesDeployment(local.repository, local.head);
   } catch {
     return failure('GitHub recheck failed after public URL verification');
   }
   if (typeof finalRemoteMain !== 'string' || !/^[0-9a-f]{40}$/i.test(finalRemoteMain)
-    || !finalPagesBuild || typeof finalPagesBuild.commit !== 'string' || typeof finalPagesBuild.status !== 'string') {
+    || typeof finalPagesStatus !== 'string') {
     return failure('GitHub recheck failed after public URL verification');
   }
   if (finalRemoteMain !== actualRemoteMain || finalRemoteMain !== local.head
-    || finalPagesBuild.commit !== latestPagesBuild.commit || finalPagesBuild.commit !== local.head
-    || finalPagesBuild.status !== latestPagesBuild.status || finalPagesBuild.status !== 'built') {
+    || finalPagesStatus !== pagesStatus || finalPagesStatus !== 'succeed') {
     return failure('GitHub state changed during verification');
   }
 
@@ -186,7 +180,7 @@ export function verifyRelease({
   return {
     ok: true,
     reason: 'release verification passed',
-    details: { branch: local.branch, head: local.head, pagesCommit: latestPagesBuild.commit, url },
+    details: { branch: local.branch, head: local.head, pagesCommit: local.head, url },
   };
 }
 
