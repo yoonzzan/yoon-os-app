@@ -147,6 +147,8 @@ const prepareRecords = new Function('DATA', 'ENRICH', `
   ${namedFunction('normalizeEnrichmentTag')}
   ${namedFunction('validateEnrichments')}
   ${namedFunction('composeRecords')}
+  ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('resolveConnection')}
   ${namedFunction('resolveConnections')}
   ${namedFunction('recordDate')}
