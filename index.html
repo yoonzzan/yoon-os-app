@@ -978,6 +978,14 @@ function validateGraphCurrent(value){
   }catch(error){ return { ok:false, value:empty }; }
 }
 
+/* GRAPH 에는 프로젝터 원본을 그대로 둡니다. composeGraphFacts · graphTargetCatalog ·
+   canonicalizeQueuedGraphCommand · buildGraphCommand · resolveGraphReceipt 은 각자 받은 값을
+   직접 파싱하는데, validateGraphCurrent 는 전송 형식을 축약해 돌려주므로 그 결과를 다시 넣으면
+   전부 실패합니다. 검증에 실패했을 때만 빈 값을 두며, 빈 값은 다시 넣어도 통과합니다. */
+function graphCurrentToKeep(rawValue, checked){
+  return checked.ok ? rawValue : checked.value;
+}
+
 function composeGraphFacts(graphCurrent){
   const checked = validateGraphCurrent(graphCurrent);
   if(!checked.ok) return { ok:false, records:{} };
@@ -1066,19 +1074,21 @@ async function loadGraphCurrent(){
   try{
     j = await gh('graph-current.json?ref=' + (cfg.branch || 'main'), { cache:'no-store' });
   }catch(error){
-    const checked = validateGraphCurrent(ls.get(cache.current, null));
+    const cached = ls.get(cache.current, null);
+    const checked = validateGraphCurrent(cached);
+    GRAPH = graphCurrentToKeep(cached, checked);
     if(checked.ok){
-      GRAPH = checked.value; graphLoadState = 'cached';
+      graphLoadState = 'cached';
       await reconcileGraphPending();
       return GRAPH;
     }
-    GRAPH = checked.value; graphLoadState = 'unavailable'; return GRAPH;
+    graphLoadState = 'unavailable'; return GRAPH;
   }
-  let checked;
-  try{ checked = validateGraphCurrent(JSON.parse(b64decode(j.content))); }
-  catch(error){ checked = { ok:false, value:{ schema_version:1, projection_sequence:0, nodes:[], contains:[] } }; }
-  if(!checked.ok){ GRAPH = checked.value; graphLoadState = 'incompatible'; return GRAPH; }
-  GRAPH = checked.value; graphLoadState = 'loaded';
+  let raw = null, checked;
+  try{ raw = JSON.parse(b64decode(j.content)); checked = validateGraphCurrent(raw); }
+  catch(error){ raw = null; checked = { ok:false, value:{ schema_version:1, projection_sequence:0, nodes:[], contains:[] } }; }
+  if(!checked.ok){ GRAPH = graphCurrentToKeep(raw, checked); graphLoadState = 'incompatible'; return GRAPH; }
+  GRAPH = graphCurrentToKeep(raw, checked); graphLoadState = 'loaded';
   ls.set(cache.current, GRAPH); ls.set(cache.etag, j.sha || j.etag || ''); ls.set(cache.at, Date.now());
   await reconcileGraphPending();
   return GRAPH;
@@ -1663,10 +1673,12 @@ function graphTargetCatalog(graphCurrent, records, projects){
   }
   return { ok:true, targets };
 }
-function resolveConnection(connection, records, projects, graphCurrent){
+/* catalog 은 한 목록·한 화면에서 똑같으므로 호출자가 만들어 넘길 수 있습니다. graphTargetCatalog
+   은 그래프 전체를 다시 파싱하므로(실측 3.4ms) 연결마다 부르면 prepData 가 수백 배 느려집니다. */
+function resolveConnection(connection, records, projects, graphCurrent, catalog){
   const missing = { kind:'', label:'대상 없음', href:'' };
   if(!connection || typeof connection !== 'object') return missing;
-  const graph = graphTargetCatalog(graphCurrent, records, projects);
+  const graph = catalog || graphTargetCatalog(graphCurrent, records, projects);
   if(graph.ok){
     const target = graph.targets[connection.target_id];
     if(!target || target.kind !== connection.kind) return missing;
@@ -1687,9 +1699,11 @@ function resolveConnection(connection, records, projects, graphCurrent){
   }
   return missing;
 }
-function resolveConnections(connections, records, projects, graphCurrent){
-  return (Array.isArray(connections) ? connections : []).map(connection =>
-    resolveConnection(connection, records, projects, graphCurrent));
+function resolveConnections(connections, records, projects, graphCurrent, catalog){
+  const list = Array.isArray(connections) ? connections : [];
+  if(!list.length) return [];
+  const shared = catalog || graphTargetCatalog(graphCurrent, records, projects);
+  return list.map(connection => resolveConnection(connection, records, projects, graphCurrent, shared));
 }
 function recordSearchText(record){
   return [record && record.body, ...((record && record.displayTags) || []), ...((record && record.detail) || []),
@@ -1896,9 +1910,11 @@ function prepData(){
   const sourceRecords = Array.isArray(DATA.records) ? DATA.records : [];
   const projects = ENRICH && ENRICH.targets && ENRICH.targets.projects;
   const graphCurrent = typeof GRAPH === 'undefined' ? null : GRAPH;
+  /* 기록마다 다시 만들지 않습니다 — 같은 그래프·같은 기록 목록이라 결과가 동일합니다. */
+  const catalog = graphTargetCatalog(graphCurrent, sourceRecords, projects);
   ALL = composeRecords(sourceRecords, ENRICH, graphCurrent).map((r, order) => {
     const _d = recordDate(r);
-    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects, graphCurrent),
+    return {...r, relatedItems:resolveConnections(r.connections, sourceRecords, projects, graphCurrent, catalog),
       _d, _at:recordSavedAt(r, _d), _order:order};
   }).sort((a,b) => b._at - a._at || a._order - b._order);
 }

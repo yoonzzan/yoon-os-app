@@ -64,13 +64,17 @@ function assignedLiteral(name) {
   assert.fail(`${name} literal must be balanced`);
 }
 
-const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent } = new Function(`
+const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent,
+  graphTargetCatalog, graphCurrentToKeep } = new Function(`
   ${namedFunction('normalizeEnrichmentTag')}
   ${namedFunction('validateEnrichments')}
   ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphCurrentToKeep')}
   ${namedFunction('composeGraphFacts')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('composeRecords')}
-  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent };
+  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent,
+    graphTargetCatalog, graphCurrentToKeep };
 `)();
 
 const HASH_A = `sha256-${'a'.repeat(64)}`;
@@ -213,6 +217,20 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   const graphFacts = composeGraphFacts(graphCurrent);
   assert.equal(validateGraphCurrent(graphCurrent).ok, true,
     'the actual Python graph projector output must satisfy the browser graph contract');
+  /* validateGraphCurrent reduces the wire shape rather than returning it unchanged, so its
+     output cannot be fed back in. Every graph consumer parses what it is handed, so whatever
+     the app keeps in GRAPH has to survive that parse — keeping the reduced value silently
+     disabled graph facts, connection targets, and the record edit button everywhere. */
+  const keptGraph = graphCurrentToKeep(graphCurrent, validateGraphCurrent(graphCurrent));
+  assert.equal(composeGraphFacts(keptGraph).ok, true,
+    'the graph value the app keeps must still be parseable by composeGraphFacts');
+  assert.equal(graphTargetCatalog(keptGraph, [], {}).ok, true,
+    'the graph value the app keeps must still be parseable by graphTargetCatalog');
+  assert.equal(composeRecords([scenarioRecord('source_only')], canonicalProjection.enrichment_current, keptGraph)[0].graphCurrent, true,
+    'records composed from the kept graph stay graph-current, which is what enables editing');
+  const rejectedGraph = validateGraphCurrent({ bogus:true });
+  assert.equal(validateGraphCurrent(graphCurrentToKeep({ bogus:true }, rejectedGraph)).ok, true,
+    'the empty fallback kept when validation fails is itself consumable');
   const casefoldGraph = structuredClone(graphCurrent);
   const casefoldTag = casefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
   casefoldTag.normalized_key = 'strasse';
@@ -525,6 +543,7 @@ function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', b
     let graphLoadState = 'unavailable';
     ${namedFunction('normalizeEnrichmentTag')}
     ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('graphCurrentToKeep')}
     ${namedFunction('graphCacheKeys')}
     async function reconcileGraphPending() {}
     ${namedFunction('loadGraphCurrent')}
@@ -544,6 +563,17 @@ function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', b
     'a remote graph failure reports an explicit cached state without breaking records');
   assert.equal(cachedGraph.GRAPH.nodes.length, canonicalProjection.graph_current.nodes.length,
     'a validated cached graph remains available for graph-primary composition');
+  /* Whatever a load leaves in GRAPH is handed straight to consumers that parse it again. */
+  assert.equal(composeGraphFacts(cachedGraph.GRAPH).ok, true,
+    'a cached load leaves GRAPH in a state its consumers can still parse');
+  const loadedGraph = await makeGraphLoader(
+    async () => ({ content:JSON.stringify(canonicalProjection.graph_current) }), new Map()
+  )();
+  assert.equal(loadedGraph.graphLoadState, 'loaded', 'a valid remote graph loads');
+  assert.equal(composeGraphFacts(loadedGraph.GRAPH).ok, true,
+    'a remote load leaves GRAPH in a state its consumers can still parse');
+  assert.equal(graphTargetCatalog(loadedGraph.GRAPH, [], {}).ok, true,
+    'a remote load leaves GRAPH usable for connection target resolution');
   const incompatibleGraph = await makeGraphLoader(
     async () => ({ content:JSON.stringify(canonicalProjection.scenarios.incompatible_schema.graph_current) }), graphCache
   )();
