@@ -738,7 +738,12 @@ function validateEnrichments(value){
     const records = {};
     for(const [recordId, item] of Object.entries(value.records)){
       if(!safeId(recordId) || !isObject(item)) throw new Error('invalid record state');
-      const allowed = new Set(['record_id','source_hash','content_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision']);
+      /* 프로젝터는 태그·연결의 진행 상태를 따로도 내보내지만 앱은 합쳐진 status 만 읽습니다.
+         값을 담지 않고 통과만 시킵니다 — 모르는 키 하나로 sidecar 전체를 버리면
+         태그·연결이 통째로 사라집니다. */
+      const allowed = new Set(['record_id','source_hash','content_hash','status','status_reason','prompt_version','redaction_version','tags','connections','event_receipts','applied_event_ids','provenance','retry_at','privacy_decision',
+        'tag_status','tag_status_reason','tag_work_key','tag_retry_at',
+        'connection_status','connection_status_reason','connection_work_key','connection_retry_at']);
       if(!Object.keys(item).every(k => allowed.has(k)) || item.record_id !== recordId || !safeHash(item.source_hash)
          || (item.content_hash !== undefined && !safeHash(item.content_hash))
          || !statuses.has(item.status) || !safeReason(item.status_reason)
