@@ -127,7 +127,7 @@
 
   .list{display:grid;gap:9px;min-width:0}
   @media(min-width:560px){ .list{grid-template-columns:1fr 1fr} }
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;width:100%;min-width:0;max-width:100%}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 15px;cursor:pointer;width:100%;min-width:0;max-width:100%}
   .card .meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;min-width:0}
   .card .t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:99px;color:#fff}
   .card .d{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--dim)}
@@ -166,10 +166,11 @@
   .card.focused{outline:2px solid var(--accent);outline-offset:2px}
   .card .enrichment-issue{margin:7px 0 0;padding:7px 9px;border-left:3px solid var(--accent);border-radius:0 8px 8px 0;background:color-mix(in srgb,var(--accent) 8%,var(--card));font-size:11.5px;color:var(--ink)}
   .card .enrichment-issue.error{border-left-color:#b43d2f}
-  .card .record-actions{display:flex;justify-content:flex-end;margin-top:10px}
+  /* 수정은 펼친 카드에서만 꺼냅니다 — 접힌 목록에 매 장 떠 있으면 읽기를 방해합니다 */
+  .card .record-actions{display:none;justify-content:flex-end;margin-top:10px}
+  .card.selected .record-actions{display:flex}
   .card .record-edit{min-width:44px;min-height:44px;padding:8px 13px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--ink);font-size:12px;cursor:pointer}
   .card .record-edit[disabled]{opacity:.5;cursor:not-allowed}
-  .card p[role=button]{cursor:pointer}
   .enrich-notice{margin:0 0 10px;padding:8px 11px;border-left:3px solid var(--accent);border-radius:0 9px 9px 0;
     background:var(--card);color:var(--dim);font-size:12px}
   .enrich-controls{grid-column:1 / -1;margin-top:5px;padding-top:9px;border-top:1px solid var(--line)}
@@ -2083,22 +2084,42 @@ async function submitCardEnrichment(cardElement, trigger){
     setEnrichmentUploadState(cardElement, false);
   }
 }
-/* 본문을 탭하면 잘린 글이 펼쳐지고, 상세가 있으면 함께 열린다 */
+/* 카드 아무 곳이나 누르면 펼쳐지고, 한 목록에서 한 장만 열립니다.
+   전에는 본문 <p> 에만 핸들러가 있어 여백·날짜줄을 눌러도 반응이 없었고,
+   여러 장이 동시에 펼쳐진 채 각각 주황 테두리가 남아 다중 선택처럼 보였습니다. */
+function setCardOpen(c, open){
+  const p = c.querySelector('p.card-body');
+  const dl = c.querySelector('.dt');
+  const metadata = c.querySelector('[data-card-metadata]');
+  const editPanel = c.querySelector('[data-enrich-editor-panel]');
+  const edit = c.querySelector('[data-enrich-edit]');
+  if(p){ p.classList.toggle('open', open); p.setAttribute('aria-expanded', String(open)); }
+  if(dl) dl.hidden = !open;
+  if(metadata) metadata.hidden = !open;
+  c.classList.toggle('selected', open);
+  /* 접힌 카드에 열린 편집 패널이 남지 않게 함께 닫습니다 */
+  if(!open){
+    if(editPanel) editPanel.hidden = true;
+    if(edit) edit.setAttribute('aria-expanded', 'false');
+  }
+}
+/* 링크·버튼·입력과 편집 패널 안쪽은 자기 동작이 있으니 펼침으로 가로채지 않습니다 */
+function cardToggleIgnoresEvent(event){
+  if(event.target.closest('a, button, input, select, textarea, label, [data-enrich-editor-panel]')) return true;
+  /* 본문을 길게 눌러 드래그 선택한 것을 탭으로 오인하지 않습니다 */
+  return String(window.getSelection() || '').length > 0;
+}
 function bind(el){
-  el.querySelectorAll('.card').forEach(c => {
-    const p = c.querySelector('p');
-    const dl = c.querySelector('.dt');
-    const metadata = c.querySelector('[data-card-metadata]');
+  const cards = [...el.querySelectorAll('.card')];
+  cards.forEach(c => {
+    const p = c.querySelector('p.card-body');
+    c.onclick = event => {
+      if(cardToggleIgnoresEvent(event)) return;
+      const next = toggleCardDetails(c.classList.contains('selected'));
+      if(next.open) for(const other of cards) if(other !== c) setCardOpen(other, false);
+      setCardOpen(c, next.open);
+    };
     if(p){
-      const setDetails = open => {
-        const next = toggleCardDetails(open);
-        p.classList.toggle('open', next.open);
-        p.setAttribute('aria-expanded', next.expanded);
-        if(dl) dl.hidden = next.hidden;
-        c.classList.toggle('selected', next.open);
-        if(metadata) metadata.hidden = !next.open;
-      };
-      p.onclick = () => setDetails(p.getAttribute('aria-expanded') === 'true');
       p.onkeydown = event => {
         if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); p.click(); }
       };

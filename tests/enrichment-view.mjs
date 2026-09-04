@@ -1354,12 +1354,26 @@ assert.match(mainCardMarkup, /for="enrich-tag-main-rec-a"[\s\S]*id="enrich-tag-m
 assert.match(subCardMarkup, /for="enrich-tag-sub-rec-a"[\s\S]*id="enrich-tag-sub-rec-a"[\s\S]*id="enrich-connection-search-sub-rec-a"/,
   'subview editor labels target namespaced inputs');
 const bindSource = namedFunction('bind');
-assert.match(bindSource, /const metadata = c\.querySelector\('\[data-card-metadata\]'\)/,
+const setCardOpenSource = namedFunction('setCardOpen');
+const ignoreSource = namedFunction('cardToggleIgnoresEvent');
+assert.match(setCardOpenSource, /const metadata = c\.querySelector\('\[data-card-metadata\]'\)/,
   'card binding tracks the separately rendered metadata section');
-assert.match(bindSource, /c\.classList\.toggle\('selected', next\.open\)/,
-  'selecting a card makes its metadata state explicit');
-assert.match(bindSource, /metadata\.hidden = !next\.open/,
-  'metadata is revealed only while the card is selected');
+assert.match(setCardOpenSource, /c\.classList\.toggle\('selected', open\)/,
+  'expanding a card makes its metadata state explicit');
+assert.match(setCardOpenSource, /metadata\.hidden = !open/,
+  'metadata is revealed only while the card is expanded');
+assert.match(setCardOpenSource, /if\(!open\)\{[\s\S]*editPanel\.hidden = true;[\s\S]*edit\.setAttribute\('aria-expanded', 'false'\)/,
+  'collapsing a card also closes its edit panel and resets the button state');
+assert.match(bindSource, /c\.onclick = event =>/,
+  'the whole card, not just its body text, is the expand target');
+assert.match(bindSource, /if\(cardToggleIgnoresEvent\(event\)\) return/,
+  'card expansion yields to the links, buttons, and inputs inside the card');
+assert.match(bindSource, /if\(next\.open\) for\(const other of cards\) if\(other !== c\) setCardOpen\(other, false\)/,
+  'only one card in a list stays expanded, so the accent border never reads as multi-select');
+assert.match(ignoreSource, /closest\('a, button, input, select, textarea, label, \[data-enrich-editor-panel\]'\)/,
+  'interactive descendants and the edit panel keep their own click behaviour');
+assert.match(ignoreSource, /window\.getSelection\(\)/,
+  'dragging a text selection across the body is not treated as a tap');
 assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
   'namespaced cards never derive a logical record ID from their DOM ID');
 assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
@@ -1409,6 +1423,12 @@ assert.match(html, /\.card\{[^}]*width:100%;min-width:0;max-width:100%\}/,
   'record cards keep a fixed width inside responsive grid tracks');
 assert.match(html, /\.card p\{[^}]*overflow-wrap:anywhere;word-break:break-word;/,
   'long record text wraps instead of expanding the card width');
+assert.match(html, /\.card\{[^}]*cursor:pointer/,
+  'the whole card advertises itself as the expand target');
+assert.match(html, /\.card \.record-actions\{display:none;/,
+  'the edit button stays out of the collapsed list');
+assert.match(html, /\.card\.selected \.record-actions\{display:flex\}/,
+  'the edit button appears only on the expanded card');
 
 const focusState = { q:'현재 검색', tag:'memo', undone:true };
 const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };
