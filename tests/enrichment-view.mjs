@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -98,17 +99,9 @@ function locateProjectorRoot(){
   return repository;
 }
 const projectorRoot = locateProjectorRoot();
-function projectCurrentFixture() {
-  const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
-  const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
-  assert.ok(existsSync(generator),
-    'the LifeOS projector is required; set LIFE_OS_ROOT when the sibling repository is elsewhere');
-  const generated = JSON.parse(execFileSync('python3', [generator], {
-    cwd:projectorRoot, encoding:'utf8',
-  }));
-  assert.deepEqual(generated, checkedIn,
-    'the checked-in app fixture must exactly match the production Python projector output');
-  return checkedIn;
+const projectorGenerator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
+function loadCheckedInFixture() {
+  return JSON.parse(readFileSync(fixturePath, 'utf8'));
 }
 const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
 const sidecar = { schema_version: 1, records: {
@@ -186,7 +179,7 @@ for(const malformedPrivacyDecision of [
   assert.equal(validateEnrichments(malformedPrivacy).ok, false,
     'a privacy decision must contain exactly one canonical scope hash');
 }
-const canonicalProjection = projectCurrentFixture();
+const canonicalProjection = loadCheckedInFixture();
 const canonicalEnrichment = canonicalProjection.enrichment_current || canonicalProjection;
 assert.ok(canonicalProjection.graph_current,
   'the checked-in fixture must contain graph_current so graph cutover coverage never skips');
@@ -1671,3 +1664,19 @@ assert.match(source, /q:'yz-queue'[\s\S]*eq:'yz-enrich-queue'/,
   'capture and enrichment queues remain distinct throughout pre-cutover shadow mode');
 
 console.log('enrichment view contracts pass');
+
+/* Parity with the projector is its own test. It used to be a top-level assertion, so once the
+   projector moved ahead the whole file stopped here and the card and graph assertions below —
+   dozens of them — silently never ran. Keeping it separate means a projector change fails only
+   the gate that is actually about the projector. */
+test('the checked-in fixture matches the production projector output', t => {
+  if(!existsSync(projectorGenerator)){
+    t.skip(`no LifeOS projector at ${projectorGenerator}; set LIFE_OS_ROOT to run this gate`);
+    return;
+  }
+  const generated = JSON.parse(execFileSync('python3', [projectorGenerator], {
+    cwd:projectorRoot, encoding:'utf8',
+  }));
+  assert.deepEqual(generated, loadCheckedInFixture(),
+    'the checked-in app fixture must exactly match the production Python projector output');
+});
