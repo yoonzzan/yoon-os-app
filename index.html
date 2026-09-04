@@ -717,6 +717,7 @@ function validateEnrichments(value){
   const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
   const statuses = new Set(['pending', 'completed', 'skipped', 'failed', 'retry_wait', 'privacy_review_required']);
   const origins = new Set(['auto', 'source', 'user']);
+  const connectionKinds = new Set(['record', 'project', 'daily_note', 'document']);
   const copyCatalog = (catalog, name) => {
     if(!isObject(catalog)) throw new Error(`invalid ${name} catalog`);
     const result = {};
@@ -763,10 +764,14 @@ function validateEnrichments(value){
       }
       const connections = [];
       const connectionKeys = new Set();
+      /* 하루 기록·문서는 targets 목록이 없고 그래프에서 풀립니다(resolveConnection).
+         그 두 종류를 여기서 거부하면 그런 연결 한 건이 sidecar 전체를 버리게 만듭니다. */
+      const catalogued = { record:'records', project:'projects' };
       for(const connection of item.connections){
+        const catalog = catalogued[connection && connection.kind];
         if(!isObject(connection) || Object.keys(connection).length !== 3 || !origins.has(connection.origin)
-           || !safeId(connection.target_id) || !['record','project'].includes(connection.kind)
-           || !(connection.kind === 'record' ? connection.target_id in targets.records : connection.target_id in targets.projects)) throw new Error('invalid connection');
+           || !safeId(connection.target_id) || !connectionKinds.has(connection.kind)
+           || (catalog && !(connection.target_id in targets[catalog]))) throw new Error('invalid connection');
         const key = `${connection.kind}:${connection.target_id}`;
         if(connectionKeys.has(key)) throw new Error('duplicate connection');
         connectionKeys.add(key); connections.push({ kind:connection.kind, target_id:connection.target_id, origin:connection.origin });

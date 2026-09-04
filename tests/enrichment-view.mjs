@@ -115,6 +115,43 @@ const sidecar = { schema_version: 1, records: {
 } };
 
 assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
+/* Both halves of the projector catch-up: the split progress fields it started emitting,
+   and the graph connection kinds it has been emitting all along. */
+const splitStatusSidecar = structuredClone(sidecar);
+Object.assign(splitStatusSidecar.records['rec-a'], {
+  tag_status:'completed', tag_status_reason:'completed', tag_work_key:'tag:1', tag_retry_at:null,
+  connection_status:'pending', connection_status_reason:'pending',
+  connection_work_key:'connection:1', connection_retry_at:null,
+});
+assert.equal(validateEnrichments(splitStatusSidecar).ok, true,
+  'the projector may split tag and connection progress out of the combined status');
+assert.deepEqual(
+  Object.keys(validateEnrichments(splitStatusSidecar).value.records['rec-a']).filter(key => key.startsWith('tag_') || key.startsWith('connection_')),
+  [], 'split progress fields are tolerated but never read back into app state');
+const unknownFieldSidecar = structuredClone(sidecar);
+unknownFieldSidecar.records['rec-a'].unexpected_field = 'x';
+assert.equal(validateEnrichments(unknownFieldSidecar).ok, false,
+  'a genuinely unknown record field is still rejected');
+/* Daily notes and documents have no targets catalog; the graph resolves them. Rejecting
+   the kind here let four live connections discard the whole 629-record sidecar. */
+for(const kind of ['daily_note', 'document']){
+  const graphKindSidecar = structuredClone(sidecar);
+  graphKindSidecar.records['rec-a'].connections = [{ kind, target_id:'note-2026-08-09', origin:'auto' }];
+  const checkedGraphKind = validateEnrichments(graphKindSidecar);
+  assert.equal(checkedGraphKind.ok, true, `${kind} connections survive validation without a targets catalog`);
+  assert.deepEqual(checkedGraphKind.value.records['rec-a'].connections,
+    [{ kind, target_id:'note-2026-08-09', origin:'auto' }], `${kind} connections are preserved verbatim`);
+}
+const unknownKindSidecar = structuredClone(sidecar);
+unknownKindSidecar.records['rec-a'].connections = [{ kind:'tag', target_id:'t-1', origin:'auto' }];
+assert.equal(validateEnrichments(unknownKindSidecar).ok, false,
+  'a connection kind outside the graph vocabulary is still rejected');
+for(const catalogued of ['record', 'project']){
+  const uncataloguedSidecar = structuredClone(sidecar);
+  uncataloguedSidecar.records['rec-a'].connections = [{ kind:catalogued, target_id:'not-in-catalog', origin:'auto' }];
+  assert.equal(validateEnrichments(uncataloguedSidecar).ok, false,
+    `${catalogued} connections must still point at a catalogued target`);
+}
 const sourceScopedPrivacy = structuredClone(sidecar);
 sourceScopedPrivacy.records['rec-a'].privacy_decision = {
   action:'allow_redacted', source_hash:HASH_A, redaction_version:1,
