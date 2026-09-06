@@ -21,3 +21,7 @@ jobs:
       - run: python3 -m unittest -v tests.test_publish_branch
       - run: python3 -m py_compile scripts/publish_branch.py
       - run: node --test tests/release-verifier.test.mjs
+      # 앱 동작 테스트. LifeOS 저장소가 없는 러너에서는 프로젝터 정합 게이트만
+      # skip 되고 나머지 단언은 그대로 돈다.
+      - run: node --test tests/enrichment-view.mjs
+      - run: node --test tests/capture-collections.mjs

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -64,13 +65,17 @@ function assignedLiteral(name) {
   assert.fail(`${name} literal must be balanced`);
 }
 
-const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent } = new Function(`
+const { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent,
+  graphTargetCatalog, graphCurrentToKeep } = new Function(`
   ${namedFunction('normalizeEnrichmentTag')}
   ${namedFunction('validateEnrichments')}
   ${namedFunction('validateGraphCurrent')}
+  ${namedFunction('graphCurrentToKeep')}
   ${namedFunction('composeGraphFacts')}
+  ${namedFunction('graphTargetCatalog')}
   ${namedFunction('composeRecords')}
-  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent };
+  return { composeRecords, composeGraphFacts, validateEnrichments, validateGraphCurrent,
+    graphTargetCatalog, graphCurrentToKeep };
 `)();
 
 const HASH_A = `sha256-${'a'.repeat(64)}`;
@@ -94,17 +99,9 @@ function locateProjectorRoot(){
   return repository;
 }
 const projectorRoot = locateProjectorRoot();
-function projectCurrentFixture() {
-  const checkedIn = JSON.parse(readFileSync(fixturePath, 'utf8'));
-  const generator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
-  assert.ok(existsSync(generator),
-    'the LifeOS projector is required; set LIFE_OS_ROOT when the sibling repository is elsewhere');
-  const generated = JSON.parse(execFileSync('python3', [generator], {
-    cwd:projectorRoot, encoding:'utf8',
-  }));
-  assert.deepEqual(generated, checkedIn,
-    'the checked-in app fixture must exactly match the production Python projector output');
-  return checkedIn;
+const projectorGenerator = resolve(projectorRoot, 'tests', 'projector_app_fixture.py');
+function loadCheckedInFixture() {
+  return JSON.parse(readFileSync(fixturePath, 'utf8'));
 }
 const records = [{ record_id: 'rec-a', source_hash: HASH_A, tags: ['수동'], body: '본문' }];
 const sidecar = { schema_version: 1, records: {
@@ -115,6 +112,43 @@ const sidecar = { schema_version: 1, records: {
 } };
 
 assert.equal(validateEnrichments(sidecar).ok, true, 'a schema-v1 sidecar must validate');
+/* Both halves of the projector catch-up: the split progress fields it started emitting,
+   and the graph connection kinds it has been emitting all along. */
+const splitStatusSidecar = structuredClone(sidecar);
+Object.assign(splitStatusSidecar.records['rec-a'], {
+  tag_status:'completed', tag_status_reason:'completed', tag_work_key:'tag:1', tag_retry_at:null,
+  connection_status:'pending', connection_status_reason:'pending',
+  connection_work_key:'connection:1', connection_retry_at:null,
+});
+assert.equal(validateEnrichments(splitStatusSidecar).ok, true,
+  'the projector may split tag and connection progress out of the combined status');
+assert.deepEqual(
+  Object.keys(validateEnrichments(splitStatusSidecar).value.records['rec-a']).filter(key => key.startsWith('tag_') || key.startsWith('connection_')),
+  [], 'split progress fields are tolerated but never read back into app state');
+const unknownFieldSidecar = structuredClone(sidecar);
+unknownFieldSidecar.records['rec-a'].unexpected_field = 'x';
+assert.equal(validateEnrichments(unknownFieldSidecar).ok, false,
+  'a genuinely unknown record field is still rejected');
+/* Daily notes and documents have no targets catalog; the graph resolves them. Rejecting
+   the kind here let four live connections discard the whole 629-record sidecar. */
+for(const kind of ['daily_note', 'document']){
+  const graphKindSidecar = structuredClone(sidecar);
+  graphKindSidecar.records['rec-a'].connections = [{ kind, target_id:'note-2026-08-09', origin:'auto' }];
+  const checkedGraphKind = validateEnrichments(graphKindSidecar);
+  assert.equal(checkedGraphKind.ok, true, `${kind} connections survive validation without a targets catalog`);
+  assert.deepEqual(checkedGraphKind.value.records['rec-a'].connections,
+    [{ kind, target_id:'note-2026-08-09', origin:'auto' }], `${kind} connections are preserved verbatim`);
+}
+const unknownKindSidecar = structuredClone(sidecar);
+unknownKindSidecar.records['rec-a'].connections = [{ kind:'tag', target_id:'t-1', origin:'auto' }];
+assert.equal(validateEnrichments(unknownKindSidecar).ok, false,
+  'a connection kind outside the graph vocabulary is still rejected');
+for(const catalogued of ['record', 'project']){
+  const uncataloguedSidecar = structuredClone(sidecar);
+  uncataloguedSidecar.records['rec-a'].connections = [{ kind:catalogued, target_id:'not-in-catalog', origin:'auto' }];
+  assert.equal(validateEnrichments(uncataloguedSidecar).ok, false,
+    `${catalogued} connections must still point at a catalogued target`);
+}
 const sourceScopedPrivacy = structuredClone(sidecar);
 sourceScopedPrivacy.records['rec-a'].privacy_decision = {
   action:'allow_redacted', source_hash:HASH_A, redaction_version:1,
@@ -145,7 +179,7 @@ for(const malformedPrivacyDecision of [
   assert.equal(validateEnrichments(malformedPrivacy).ok, false,
     'a privacy decision must contain exactly one canonical scope hash');
 }
-const canonicalProjection = projectCurrentFixture();
+const canonicalProjection = loadCheckedInFixture();
 const canonicalEnrichment = canonicalProjection.enrichment_current || canonicalProjection;
 assert.ok(canonicalProjection.graph_current,
   'the checked-in fixture must contain graph_current so graph cutover coverage never skips');
@@ -176,6 +210,20 @@ assert.equal(validateEnrichments(canonicalWithExtraTargetField).ok, false,
   const graphFacts = composeGraphFacts(graphCurrent);
   assert.equal(validateGraphCurrent(graphCurrent).ok, true,
     'the actual Python graph projector output must satisfy the browser graph contract');
+  /* validateGraphCurrent reduces the wire shape rather than returning it unchanged, so its
+     output cannot be fed back in. Every graph consumer parses what it is handed, so whatever
+     the app keeps in GRAPH has to survive that parse — keeping the reduced value silently
+     disabled graph facts, connection targets, and the record edit button everywhere. */
+  const keptGraph = graphCurrentToKeep(graphCurrent, validateGraphCurrent(graphCurrent));
+  assert.equal(composeGraphFacts(keptGraph).ok, true,
+    'the graph value the app keeps must still be parseable by composeGraphFacts');
+  assert.equal(graphTargetCatalog(keptGraph, [], {}).ok, true,
+    'the graph value the app keeps must still be parseable by graphTargetCatalog');
+  assert.equal(composeRecords([scenarioRecord('source_only')], canonicalProjection.enrichment_current, keptGraph)[0].graphCurrent, true,
+    'records composed from the kept graph stay graph-current, which is what enables editing');
+  const rejectedGraph = validateGraphCurrent({ bogus:true });
+  assert.equal(validateGraphCurrent(graphCurrentToKeep({ bogus:true }, rejectedGraph)).ok, true,
+    'the empty fallback kept when validation fails is itself consumable');
   const casefoldGraph = structuredClone(graphCurrent);
   const casefoldTag = casefoldGraph.nodes.find(node => node.node_id === scenarioRecord('source_only').record_id).tags[0];
   casefoldTag.normalized_key = 'strasse';
@@ -488,6 +536,7 @@ function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', b
     let graphLoadState = 'unavailable';
     ${namedFunction('normalizeEnrichmentTag')}
     ${namedFunction('validateGraphCurrent')}
+    ${namedFunction('graphCurrentToKeep')}
     ${namedFunction('graphCacheKeys')}
     async function reconcileGraphPending() {}
     ${namedFunction('loadGraphCurrent')}
@@ -507,6 +556,17 @@ function makeGraphLoader(gh, cache, config = { owner:'owner-a', repo:'repo-a', b
     'a remote graph failure reports an explicit cached state without breaking records');
   assert.equal(cachedGraph.GRAPH.nodes.length, canonicalProjection.graph_current.nodes.length,
     'a validated cached graph remains available for graph-primary composition');
+  /* Whatever a load leaves in GRAPH is handed straight to consumers that parse it again. */
+  assert.equal(composeGraphFacts(cachedGraph.GRAPH).ok, true,
+    'a cached load leaves GRAPH in a state its consumers can still parse');
+  const loadedGraph = await makeGraphLoader(
+    async () => ({ content:JSON.stringify(canonicalProjection.graph_current) }), new Map()
+  )();
+  assert.equal(loadedGraph.graphLoadState, 'loaded', 'a valid remote graph loads');
+  assert.equal(composeGraphFacts(loadedGraph.GRAPH).ok, true,
+    'a remote load leaves GRAPH in a state its consumers can still parse');
+  assert.equal(graphTargetCatalog(loadedGraph.GRAPH, [], {}).ok, true,
+    'a remote load leaves GRAPH usable for connection target resolution');
   const incompatibleGraph = await makeGraphLoader(
     async () => ({ content:JSON.stringify(canonicalProjection.scenarios.incompatible_schema.graph_current) }), graphCache
   )();
@@ -1317,12 +1377,26 @@ assert.match(mainCardMarkup, /for="enrich-tag-main-rec-a"[\s\S]*id="enrich-tag-m
 assert.match(subCardMarkup, /for="enrich-tag-sub-rec-a"[\s\S]*id="enrich-tag-sub-rec-a"[\s\S]*id="enrich-connection-search-sub-rec-a"/,
   'subview editor labels target namespaced inputs');
 const bindSource = namedFunction('bind');
-assert.match(bindSource, /const metadata = c\.querySelector\('\[data-card-metadata\]'\)/,
+const setCardOpenSource = namedFunction('setCardOpen');
+const ignoreSource = namedFunction('cardToggleIgnoresEvent');
+assert.match(setCardOpenSource, /const metadata = c\.querySelector\('\[data-card-metadata\]'\)/,
   'card binding tracks the separately rendered metadata section');
-assert.match(bindSource, /c\.classList\.toggle\('selected', next\.open\)/,
-  'selecting a card makes its metadata state explicit');
-assert.match(bindSource, /metadata\.hidden = !next\.open/,
-  'metadata is revealed only while the card is selected');
+assert.match(setCardOpenSource, /c\.classList\.toggle\('selected', open\)/,
+  'expanding a card makes its metadata state explicit');
+assert.match(setCardOpenSource, /metadata\.hidden = !open/,
+  'metadata is revealed only while the card is expanded');
+assert.match(setCardOpenSource, /if\(!open\)\{[\s\S]*editPanel\.hidden = true;[\s\S]*edit\.setAttribute\('aria-expanded', 'false'\)/,
+  'collapsing a card also closes its edit panel and resets the button state');
+assert.match(bindSource, /c\.onclick = event =>/,
+  'the whole card, not just its body text, is the expand target');
+assert.match(bindSource, /if\(cardToggleIgnoresEvent\(event\)\) return/,
+  'card expansion yields to the links, buttons, and inputs inside the card');
+assert.match(bindSource, /if\(next\.open\) for\(const other of cards\) if\(other !== c\) setCardOpen\(other, false\)/,
+  'only one card in a list stays expanded, so the accent border never reads as multi-select');
+assert.match(ignoreSource, /closest\('a, button, input, select, textarea, label, \[data-enrich-editor-panel\]'\)/,
+  'interactive descendants and the edit panel keep their own click behaviour');
+assert.match(ignoreSource, /window\.getSelection\(\)/,
+  'dragging a text selection across the body is not treated as a tap');
 assert.doesNotMatch(bindSource, /c\.id\.replace\(\/\^record-\//,
   'namespaced cards never derive a logical record ID from their DOM ID');
 assert.match(bindSource, /item\.record_id === c\.dataset\.recordId/,
@@ -1372,6 +1446,12 @@ assert.match(html, /\.card\{[^}]*width:100%;min-width:0;max-width:100%\}/,
   'record cards keep a fixed width inside responsive grid tracks');
 assert.match(html, /\.card p\{[^}]*overflow-wrap:anywhere;word-break:break-word;/,
   'long record text wraps instead of expanding the card width');
+assert.match(html, /\.card\{[^}]*cursor:pointer/,
+  'the whole card advertises itself as the expand target');
+assert.match(html, /\.card \.record-actions\{display:none;/,
+  'the edit button stays out of the collapsed list');
+assert.match(html, /\.card\.selected \.record-actions\{display:flex\}/,
+  'the edit button appears only on the expanded card');
 
 const focusState = { q:'현재 검색', tag:'memo', undone:true };
 const visibleSubCard = { classList:{ add(){} }, scrollIntoView(){} };
@@ -1584,3 +1664,19 @@ assert.match(source, /q:'yz-queue'[\s\S]*eq:'yz-enrich-queue'/,
   'capture and enrichment queues remain distinct throughout pre-cutover shadow mode');
 
 console.log('enrichment view contracts pass');
+
+/* Parity with the projector is its own test. It used to be a top-level assertion, so once the
+   projector moved ahead the whole file stopped here and the card and graph assertions below —
+   dozens of them — silently never ran. Keeping it separate means a projector change fails only
+   the gate that is actually about the projector. */
+test('the checked-in fixture matches the production projector output', t => {
+  if(!existsSync(projectorGenerator)){
+    t.skip(`no LifeOS projector at ${projectorGenerator}; set LIFE_OS_ROOT to run this gate`);
+    return;
+  }
+  const generated = JSON.parse(execFileSync('python3', [projectorGenerator], {
+    cwd:projectorRoot, encoding:'utf8',
+  }));
+  assert.deepEqual(generated, loadCheckedInFixture(),
+    'the checked-in app fixture must exactly match the production Python projector output');
+});
