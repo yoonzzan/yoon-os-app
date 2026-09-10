@@ -470,7 +470,10 @@ const STATUS_REASON_LABEL = {
   sensitive_output:'민감한 결과 감지', stale_scope:'기록이 변경됨', missing_trusted_version:'신뢰 버전 없음',
   terminal_work_key:'처리를 다시 시작할 수 없음', duplicate_pending_event:'중복 대기 요청',
   duplicate_event_conflict:'중복 요청 충돌', duplicate:'중복', unknown_record:'기록을 찾을 수 없음',
-  unknown_connection:'연결 대상을 찾을 수 없음', invalid_action:'유효하지 않은 요청', applied:'반영됨'
+  unknown_connection:'연결 대상을 찾을 수 없음', invalid_action:'유효하지 않은 요청', applied:'반영됨',
+  blocked_tag:'허용되지 않은 태그', payload_too_large:'요청이 너무 큼',
+  unknown_tag:'어휘에 없는 태그', vocabulary_empty:'태그 어휘가 비어 있음',
+  vocabulary_invalid:'태그 어휘 형식 오류', vocabulary_missing:'태그 어휘를 찾을 수 없음'
 };
 
 let cfg = {}, DATA = { records:[], plan:null, spending:0, streak:0, built:'' }, ALL = [];
@@ -713,7 +716,12 @@ function validateEnrichments(value){
     'invalid_reason', 'duplicate_action', 'sensitive_output', 'stale_scope',
     'missing_trusted_version', 'terminal_work_key', 'duplicate_pending_event',
     'duplicate_event_conflict', 'duplicate', 'unknown_record', 'unknown_connection',
-    'invalid_action', 'invalid_event_type', 'invalid_introduction_metadata', 'applied'
+    'invalid_action', 'invalid_event_type', 'invalid_introduction_metadata', 'applied',
+    // 워커의 _PERMANENT_ERRORS. 영구 실패는 status_reason 으로 그대로 나오는데
+    // 이 목록에 없으면 validator 가 fail-closed 로 sidecar 전체를 버린다 —
+    // 2026-09-10 에 unknown_tag 22건이 629건의 태그·연결을 통째로 지웠다.
+    'blocked_tag', 'payload_too_large', 'unknown_tag',
+    'vocabulary_empty', 'vocabulary_invalid', 'vocabulary_missing'
   ].includes(reason);
   const isObject = item => item && typeof item === 'object' && !Array.isArray(item);
   const statuses = new Set(['pending', 'completed', 'skipped', 'failed', 'retry_wait', 'privacy_review_required']);
